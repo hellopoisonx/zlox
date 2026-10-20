@@ -4,4 +4,4 @@ zig-pkg/
 *.o
 zlox
 result
-trace-test
+trace_test
