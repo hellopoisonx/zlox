@@ -4,14 +4,17 @@ const expr = @import("expr.zig");
 const diagnose = @import("diagnose.zig");
 const stmt = @import("stmt.zig");
 
-/// Recursive-descent parser for the chapter 8 grammar (§8.1):
+/// Recursive-descent parser for the chapter 8 grammar (§8.1–8.2):
 ///
-///   program   → statement* EOF ;
-///   statement → exprStmt | printStmt ;
-///   exprStmt  → expression ";" ;
-///   printStmt → "print" expression ";" ;
+///   program     → declaration* EOF ;
+///   declaration → varDecl | statement ;
+///   varDecl     → "var" IDENTIFIER ( "=" expression )? ";" ;
+///   statement   → exprStmt | printStmt ;
+///   exprStmt    → expression ";" ;
+///   printStmt   → "print" expression ";" ;
 ///
-/// on top of the chapter 6 expression grammar:
+/// on top of the chapter 6 expression grammar, with `primary` gaining
+/// IDENTIFIER (§8.2.1):
 ///
 ///   expression → equality ;
 ///   equality   → comparison ( ( "!=" | "==" ) comparison )* ;
@@ -20,12 +23,12 @@ const stmt = @import("stmt.zig");
 ///   factor     → unary ( ( "/" | "*" ) unary )* ;
 ///   unary      → ( "!" | "-" ) unary | primary ;
 ///   primary    → NUMBER | STRING | "true" | "false" | "nil"
-///               | "(" expression ")" ;
+///               | "(" expression ")" | IDENTIFIER ;
 ///
 /// Syntax errors (book §6.3) are recorded as `Diagnostic`s — the port's
 /// stand-in for the book's Lox.error side channel. `error.Parse` unwinds the
-/// descent the same way the book's ParseError exception does; `parse()`
-/// catches it and stops, so the parser never crashes or hangs on
+/// descent the same way the book's ParseError exception does; `declaration`
+/// recovers via `synchronize()`, so the parser never crashes or hangs on
 /// invalid input. Nodes and diagnostics share the caller's allocator, which
 /// is expected to be an arena (see `expr.Expr`).
 pub const Parser = struct {
@@ -41,23 +44,56 @@ pub const Parser = struct {
         return .{ .allocator = allocator, .tokens = tokens };
     }
 
-    /// Parses a whole program — statements until EOF, the `program` rule
-    /// (book §8.1.2). Panic-mode recovery is deliberately NOT wired yet:
-    /// the book defers that to §8.2 (declarations), so the first syntax
-    /// error stops the parse; collected diagnostics already keep the
-    /// program from running.
+    /// Parses a whole program — declarations until EOF, the `program`
+    /// rule (book §8.2.2). Each declaration is its own recovery point:
+    /// on a syntax error, `synchronize()` skips to the next statement
+    /// boundary and parsing continues, so one bad declaration doesn't
+    /// cascade.
     pub fn parse(self: *Parser) Error!std.ArrayList(*stmt.Stmt) {
         var statements: std.ArrayList(*stmt.Stmt) = .empty;
 
         while (!self.atEnd()) {
-            const s = self.statement() catch |err| switch (err) {
-                error.Parse => return statements,
-                else => return err,
-            };
-            try statements.append(self.allocator, s);
+            if (try self.declaration()) |s| {
+                try statements.append(self.allocator, s);
+            }
         }
 
         return statements;
+    }
+
+    /// Book §8.2.2: `declaration → varDecl | statement`. The method the
+    /// program loop repeats, so it is the panic-mode recovery point: on
+    /// `error.Parse`, `synchronize()` discards tokens to the next
+    /// statement boundary and parsing resumes with the next declaration.
+    /// The book catches here and returns null; the port does the same
+    /// (parse() then skips it — diagnostics already gate execution).
+    fn declaration(self: *Parser) Error!?*stmt.Stmt {
+        const declared: Error!*stmt.Stmt = if (self.match(.{._var}))
+            self.varDeclaration()
+        else
+            self.statement();
+
+        return declared catch |err| switch (err) {
+            error.Parse => {
+                self.synchronize();
+                return null;
+            },
+            else => err,
+        };
+    }
+
+    /// Book §8.2.2: `varDecl → "var" IDENTIFIER ( "=" expression )? ";"`.
+    /// The `var` keyword is already consumed.
+    fn varDeclaration(self: *Parser) Error!*stmt.Stmt {
+        const name = try self.consume(.identifier_literal, "Expect variable name.");
+
+        var initializer: ?*expr.Expr = null;
+        if (self.match(.{.equal})) {
+            initializer = try self.expression();
+        }
+
+        _ = try self.consume(.semicolon, "Expect ';' after variable declaration.");
+        return try stmt.Stmt.create(self.allocator, .{ .var_decl = .init(name, initializer) });
     }
 
     /// Book §8.1.2: dispatch on the leading token. `print` is the only
@@ -154,7 +190,7 @@ pub const Parser = struct {
     }
 
     /// primary → NUMBER | STRING | "true" | "false" | "nil"
-    ///          | "(" expression ")" ;
+    ///          | "(" expression ")" | IDENTIFIER ;
     fn primary(self: *Parser) Error!*expr.Expr {
         if (self.match(.{._false})) {
             return try expr.Expr.create(
@@ -185,6 +221,14 @@ pub const Parser = struct {
             return try expr.Expr.create(
                 self.allocator,
                 .{ .literal = .{ .string = self.previous().tag.string_literal } },
+            );
+        }
+
+        // Book §8.2.2: an identifier is a variable access expression.
+        if (self.match(.{.identifier_literal})) {
+            return try expr.Expr.create(
+                self.allocator,
+                .{ .variable = .init(self.previous()) },
             );
         }
 
@@ -233,8 +277,8 @@ pub const Parser = struct {
     }
 
     /// Book §6.3.3: discard tokens until the next statement boundary, so
-    /// parsing can resume without cascaded errors. No caller yet — the
-    /// book hooks this up when declarations arrive (§8.2).
+    /// parsing can resume without cascaded errors. Wired at each
+    /// declaration by §8.2's panic-mode recovery.
     fn synchronize(self: *Parser) void {
         _ = self.advance();
 
@@ -296,9 +340,3 @@ pub const Parser = struct {
             std.meta.activeTag(self.tokens[self.cursor].tag) == .eof;
     }
 };
-
-comptime {
-    // `synchronize` has no caller until declarations arrive (§8.2);
-    // referencing it here keeps the recovery machinery compile-checked.
-    _ = &Parser.synchronize;
-}

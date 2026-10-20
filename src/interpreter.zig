@@ -166,6 +166,10 @@ pub const Interpreter = struct {
                 const text = try value.stringify(self.allocator);
                 try stdout.print("{s}\n", .{text});
             },
+
+            // §8.3 (Environments) defines what executing a declaration
+            // does; the same compile-bridge as `.variable` above.
+            .var_decl => |st| return self.runtimeError(st.name, "Variables are not supported yet (§8.3: Environments)."),
         }
     }
 
@@ -173,6 +177,12 @@ pub const Interpreter = struct {
     /// before doing its own work.
     fn evaluate(self: *Interpreter, allocator: std.mem.Allocator, e: *const expr.Expr) EvalError!Value {
         return switch (e.*) {
+
+            // §8.3 (Environments) defines what looking up a variable
+            // does. Until then this bridge reports a runtime error — in
+            // the book's Java, this checkpoint doesn't even compile
+            // (the Visitor interfaces demand §8.3's visit methods).
+            .variable => |v| return self.runtimeError(v.name, "Variables are not supported yet (§8.3: Environments)."),
             // §7.2.1: a literal is syntax that already holds its runtime
             // value; evaluation just unwraps it.
             .literal => |lit| switch (lit) {

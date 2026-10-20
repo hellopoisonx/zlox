@@ -13,6 +13,7 @@ pub const Expr = union(enum) {
     grouping: Grouping,
     literal: Literal,
     unary: Unary,
+    variable: Variable,
 
     /// Heap-allocate `expr` as a node, for use in child edges.
     pub fn create(allocator: std.mem.Allocator, expr: Expr) std.mem.Allocator.Error!*Expr {
@@ -50,6 +51,16 @@ pub const Unary = struct {
 
     pub fn init(op: token.Token, right: *Expr) Unary {
         return .{ .op = op, .right = right };
+    }
+};
+
+/// Book §8.2.1 `Expr.Variable`: a variable access — simply a wrapper
+/// around the token for the variable name being looked up.
+pub const Variable = struct {
+    name: token.Token,
+
+    pub fn init(name: token.Token) Variable {
+        return .{ .name = name };
     }
 };
 
