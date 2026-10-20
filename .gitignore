@@ -2,3 +2,6 @@
 zig-out/
 zig-pkg/
 *.o
+zlox
+result
+trace-test
