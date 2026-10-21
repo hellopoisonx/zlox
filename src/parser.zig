@@ -103,6 +103,9 @@ pub const Parser = struct {
     /// statement — the standard fallthrough, since an expression's first
     /// token is hard to recognize proactively.
     fn statement(self: *Parser) Error!*stmt.Stmt {
+        if (self.match(.{._if})) {
+            return self.ifStatement();
+        }
         if (self.match(.{.print})) {
             return self.printStatement();
         }
@@ -110,6 +113,19 @@ pub const Parser = struct {
             return self.blockStatement();
         }
         return self.expressionStatement();
+    }
+
+    fn ifStatement(self: *Parser) Error!*stmt.Stmt {
+        _ = try self.consume(.l_paren, "Expect '(' after 'if'.");
+        const cond = try self.expression();
+        _ = try self.consume(.r_paren, "Expect ')' after if condition.");
+        const then = try self.statement();
+        var _else: ?*stmt.Stmt = null;
+        if (self.match(.{._else})) {
+            _else = try self.statement();
+        }
+
+        return try stmt.Stmt.create(self.allocator, .{ ._if = .init(cond, then, _else) });
     }
 
     fn blockStatement(self: *Parser) Error!*stmt.Stmt {

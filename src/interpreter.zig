@@ -199,6 +199,14 @@ pub const Interpreter = struct {
                 block_env.* = Environment.initEnclosing(self.allocator, self.environment);
                 try self.executeBlock(b.statements, block_env, stdout);
             },
+
+            ._if => |i| {
+                if (isTruthy(try self.evaluate(i.cond))) {
+                    try self.execute(i.thenBranch, stdout);
+                } else if (i.elseBranch) |e| {
+                    try self.execute(e, stdout);
+                }
+            },
         }
     }
 

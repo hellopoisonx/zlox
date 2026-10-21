@@ -12,12 +12,27 @@ pub const Stmt = union(enum) {
     print: Print,
     var_decl: Var,
     block: Block,
+    _if: If,
 
     /// Heap-allocate `stmt` as a node, for use in statement lists.
     pub fn create(allocator: std.mem.Allocator, stmt: Stmt) std.mem.Allocator.Error!*Stmt {
         const node = try allocator.create(Stmt);
         node.* = stmt;
         return node;
+    }
+};
+
+pub const If = struct {
+    cond: *expr.Expr,
+    thenBranch: *Stmt,
+    elseBranch: ?*Stmt,
+
+    pub fn init(cond: *expr.Expr, thenBranch: *Stmt, elseBranch: ?*Stmt) If {
+        return .{
+            .cond = cond,
+            .thenBranch = thenBranch,
+            .elseBranch = elseBranch,
+        };
     }
 };
 
