@@ -2,6 +2,8 @@ const std = @import("std");
 const expr = @import("expr.zig");
 const token = @import("token.zig");
 const stmt = @import("stmt.zig");
+const environment = @import("environment.zig");
+const Environment = environment.Environment;
 
 /// A runtime Lox value — the port of the book §7.1 `java.lang.Object` box.
 /// The tagged union takes Java's place: each variant is one Lox type, and
@@ -113,13 +115,14 @@ pub const RuntimeError = struct {
 /// The book's Interpreter class. The book's `throw new RuntimeError(...)`
 /// becomes two steps here: park the payload in `runtime_error`, then
 /// return `error.RuntimeError` — `try` at every call site replays the Java
-/// exception's stack unwind. Later chapters hang environment state off
-/// this struct too.
+/// exception's stack unwind. The global environment (§8.3) lives here so
+/// bindings outlive any single statement.
 pub const Interpreter = struct {
     runtime_error: ?RuntimeError = null,
     allocator: std.mem.Allocator,
+    environment: Environment,
 
-    pub const EvalError = error{RuntimeError} || std.mem.Allocator.Error;
+    pub const EvalError = error{RuntimeError} || std.mem.Allocator.Error || environment.Environment.Error;
     /// Errors from executing statements: evaluation plus the stdout
     /// writes that `print` statements make.
     pub const ExecError = EvalError || std.Io.Writer.Error;
@@ -127,6 +130,7 @@ pub const Interpreter = struct {
     pub fn init(allocator: std.mem.Allocator) Interpreter {
         return .{
             .allocator = allocator,
+            .environment = Environment.init(allocator),
         };
     }
 
@@ -167,9 +171,16 @@ pub const Interpreter = struct {
                 try stdout.print("{s}\n", .{text});
             },
 
-            // §8.3 (Environments) defines what executing a declaration
-            // does; the same compile-bridge as `.variable` above.
-            .var_decl => |st| return self.runtimeError(st.name, "Variables are not supported yet (§8.3: Environments)."),
+            // Book §8.3 visitVarStmt: evaluate the initializer if there
+            // is one; a variable without one holds nil. define() never
+            // checks for an existing binding, so redefinition is legal.
+            .var_decl => |st| {
+                var value: Value = .nil;
+                if (st.initializer) |initializer| {
+                    value = try self.evaluate(self.allocator, initializer);
+                }
+                try self.environment.define(st.name.lexeme(), value);
+            },
         }
     }
 
@@ -178,11 +189,12 @@ pub const Interpreter = struct {
     fn evaluate(self: *Interpreter, allocator: std.mem.Allocator, e: *const expr.Expr) EvalError!Value {
         return switch (e.*) {
 
-            // §8.3 (Environments) defines what looking up a variable
-            // does. Until then this bridge reports a runtime error — in
-            // the book's Java, this checkpoint doesn't even compile
-            // (the Visitor interfaces demand §8.3's visit methods).
-            .variable => |v| return self.runtimeError(v.name, "Variables are not supported yet (§8.3: Environments)."),
+            // Book §8.3 visitVariableExpr: forward to the environment.
+            // A miss is the book's "Undefined variable" RuntimeError —
+            // deferred to runtime so a function body may refer to a
+            // variable defined later (ch.10).
+            .variable => |v| self.environment.get(v.name.lexeme()) orelse
+                return self.runtimeErrorf(v.name, "Undefined variable '{s}'.", .{v.name.lexeme()}),
             // §7.2.1: a literal is syntax that already holds its runtime
             // value; evaluation just unwraps it.
             .literal => |lit| switch (lit) {
@@ -254,6 +266,11 @@ pub const Interpreter = struct {
                     else => unreachable,
                 };
             },
+            .assign => |a| blk: {
+                const value = try self.evaluate(self.allocator, a.value);
+                try self.environment.assign(a.name, value);
+                break :blk value;
+            },
         };
     }
 
@@ -264,6 +281,13 @@ pub const Interpreter = struct {
     fn runtimeError(self: *Interpreter, tok: token.Token, message: []const u8) EvalError {
         self.runtime_error = .{ .token = tok, .message = message };
         return error.RuntimeError;
+    }
+
+    /// `runtimeError` with an allocated, formatted message — the
+    /// "Undefined variable '<name>'." report interpolates the name.
+    fn runtimeErrorf(self: *Interpreter, tok: token.Token, comptime fmt: []const u8, args: anytype) EvalError {
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return error.OutOfMemory;
+        return self.runtimeError(tok, message);
     }
 
     /// The book's checkNumberOperand (§7.3.1): the unary `-` cast guard.

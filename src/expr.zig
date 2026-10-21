@@ -14,12 +14,25 @@ pub const Expr = union(enum) {
     literal: Literal,
     unary: Unary,
     variable: Variable,
+    assign: Assign,
 
     /// Heap-allocate `expr` as a node, for use in child edges.
     pub fn create(allocator: std.mem.Allocator, expr: Expr) std.mem.Allocator.Error!*Expr {
         const node = try allocator.create(Expr);
         node.* = expr;
         return node;
+    }
+};
+
+pub const Assign = struct {
+    name: token.Token,
+    value: *Expr,
+
+    pub fn init(name: token.Token, value: *Expr) Assign {
+        return .{
+            .name = name,
+            .value = value,
+        };
     }
 };
 

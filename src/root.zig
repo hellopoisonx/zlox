@@ -5,6 +5,7 @@ pub const diagnose = @import("diagnose.zig");
 pub const parser = @import("parser.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const stmt = @import("stmt.zig");
+pub const environment = @import("environment.zig");
 
 test {
     _ = token;
@@ -14,4 +15,5 @@ test {
     _ = parser;
     _ = interpreter;
     _ = stmt;
+    _ = environment;
 }

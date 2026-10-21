@@ -123,7 +123,30 @@ pub const Parser = struct {
     }
 
     fn expression(self: *Parser) Error!*expr.Expr {
-        return try self.equality();
+        return try self.assignment();
+    }
+
+    fn assignment(self: *Parser) Error!*expr.Expr {
+        const e = try self.equality();
+
+        if (self.match(.{.equal})) {
+            const equals = self.previous();
+            const value = try self.assignment();
+
+            switch (e.*) {
+                .variable => |v| {
+                    return try expr.Expr.create(
+                        self.allocator,
+                        .{ .assign = .init(v.name, value) },
+                    );
+                },
+                else => {
+                    try self.reportError(equals, "Invalid assignment target.");
+                },
+            }
+        }
+
+        return e;
     }
 
     /// equality → comparison ( ( "!=" | "==" ) comparison )* ;
