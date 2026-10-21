@@ -5,18 +5,21 @@ const zlox = @import("zlox");
 /// One Lox run (the book's Lox.run): scan, parse, execute the statement
 /// program. Only `print` statements produce output — since ch.8 the
 /// REPL takes full statements and no longer echoes expression values
-/// (book §8.1.3). The result says which error flag the book's Lox would
-/// have set — syntax errors are `hadError` (exit 65), interpreter
-/// failures are `hadRuntimeError` (exit 70).
+/// (book §8.1.3). `arena` must outlive everything built here; the
+/// interpreter is owned by the caller and outlives a single REPL line
+/// (the book's static `Interpreter`), so its global environment can hold
+/// bindings across lines. The result says which error flag the book's
+/// Lox would have set — syntax errors are `hadError` (exit 65),
+/// interpreter failures are `hadRuntimeError` (exit 70).
 const RunResult = enum { ok, syntax_error, runtime_error };
 
-fn run(source: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !RunResult {
-    // Each run gets its own arena: tokens, tree, and diagnostics are all
-    // freed together when it returns.
-    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
+fn run(
+    arena: std.mem.Allocator,
+    source: []const u8,
+    interpreter: *zlox.interpreter.Interpreter,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !RunResult {
     var scanner = zlox.scanner.Scanner.init(arena, source);
     try scanner.scanAll();
 
@@ -36,7 +39,6 @@ fn run(source: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !RunR
     if (scanner.diagnostics.items.len > 0 or
         parser.diagnostics.items.len > 0) return .syntax_error;
 
-    var interpreter = zlox.interpreter.Interpreter.init(arena);
     if (interpreter.interpret(statements.items, stdout)) {
         try stdout.flush();
         return .ok;
@@ -83,16 +85,21 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.len == 2) {
-        var file_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer file_arena.deinit();
+        // One arena for the whole script run: source, tokens, tree, and
+        // interpreter state are freed together when it exits.
+        var run_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer run_arena.deinit();
+        const arena = run_arena.allocator();
+
         const source = try Io.Dir.cwd().readFileAlloc(
             io,
             args[1],
-            file_arena.allocator(),
+            arena,
             Io.Limit.limited(16 * 1024 * 1024),
         );
 
-        const result = try run(source, stdout, stderr);
+        var interpreter = try zlox.interpreter.Interpreter.init(arena);
+        const result = try run(arena, source, &interpreter, stdout, stderr);
         // Indicate errors in the exit code (book §4.1: 65; §7.4: 70).
         switch (result) {
             .ok => {},
@@ -102,7 +109,16 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // No script: interactive prompt (the book's REPL branch).
+    // No script: interactive prompt (the book's REPL branch). One
+    // interpreter and one arena live for the whole session — jlox keeps a
+    // static Interpreter (§7.4) precisely so globals persist across REPL
+    // lines, and our environment keys and string values borrow source
+    // text, so every line's bytes must stay alive for the session too.
+    var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer session_arena_state.deinit();
+    const session = session_arena_state.allocator();
+    var interpreter = try zlox.interpreter.Interpreter.init(session);
+
     var stdin_buffer: [4096]u8 = undefined;
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
@@ -137,7 +153,10 @@ pub fn main(init: std.process.Init) !void {
             else => return e,
         };
 
-        _ = try run(line, stdout, stderr);
+        // The reader reuses stdin_buffer on the next take, so copy the
+        // line into the session arena before scanning it.
+        const source = try session.dupe(u8, line);
+        _ = try run(session, source, &interpreter, stdout, stderr);
     }
 
     try stdout.flush();

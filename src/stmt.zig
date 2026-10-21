@@ -11,12 +11,25 @@ pub const Stmt = union(enum) {
     expression: Expression,
     print: Print,
     var_decl: Var,
+    block: Block,
 
     /// Heap-allocate `stmt` as a node, for use in statement lists.
     pub fn create(allocator: std.mem.Allocator, stmt: Stmt) std.mem.Allocator.Error!*Stmt {
         const node = try allocator.create(Stmt);
         node.* = stmt;
         return node;
+    }
+};
+
+/// Book §8.5 `Stmt.Block`: a braced series of declarations whose
+/// execution gets a fresh environment (see Interpreter.executeBlock).
+pub const Block = struct {
+    statements: []const *Stmt,
+
+    pub fn init(stmts: []const *Stmt) Block {
+        return .{
+            .statements = stmts,
+        };
     }
 };
 

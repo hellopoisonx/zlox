@@ -190,8 +190,16 @@ pub const Scanner = struct {
     }
 
     fn addToken(self: *Scanner, tag: token.Token.Tag) !void {
+        // EOF has no source text (the book's EOF token also has an empty
+        // lexeme); every other token spans start..cursor.
+        const text = if (std.meta.activeTag(tag) == .eof)
+            ""
+        else
+            self.source[self.start..self.cursor];
+
         try self.tokens.append(self.allocator, token.Token{
             .tag = tag,
+            .lexeme = text,
             .line = self.line,
         });
     }

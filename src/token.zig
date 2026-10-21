@@ -2,6 +2,11 @@ const std = @import("std");
 
 pub const Token = struct {
     tag: Tag,
+    /// Raw source text of the token, as the book's `Token.lexeme` stores
+    /// it — quotes included for strings, the literal digits for numbers.
+    /// Error messages print this, so `print 1 2;` reports at '2', not at
+    /// a token kind name.
+    lexeme: []const u8,
     line: usize,
 
     pub const Tag = union(enum) {
@@ -95,49 +100,6 @@ pub const Token = struct {
                 .eof => "EOF",
             };
         }
-        pub fn lexeme(self: Tag) []const u8 {
-            return switch (self) {
-                .plus => "+",
-                .minus => "-",
-                .star => "*",
-                .dot => ".",
-                .slash => "/",
-                .semicolon => ";",
-                .l_paren => "(",
-                .r_paren => ")",
-                .l_brace => "{",
-                .r_brace => "}",
-                .less => "<",
-                .greater => ">",
-                .equal => "=",
-                .bang => "!",
-                .greater_equal => ">=",
-                .less_equal => "<=",
-                .equal_equal => "==",
-                .bang_equal => "!=",
-                .number_literal => "number",
-                .string_literal => |s| s,
-                .identifier_literal => |s| s,
-                ._and => "and",
-                ._else => "else",
-                .class => "class",
-                ._false => "false",
-                ._true => "true",
-                ._for => "for",
-                .fun => "fun",
-                ._if => "if",
-                .nil => "nil",
-                ._or => "or",
-                .print => "print",
-                ._return => "return",
-                .super => "super",
-                .this => "this",
-                ._var => "var",
-                ._while => "while",
-                .eof => "",
-            };
-        }
-
         pub fn format(self: Tag, w: *std.Io.Writer) std.Io.Writer.Error!void {
             switch (self) {
                 .plus => try w.print("PLUS (+)", .{}),
@@ -184,8 +146,5 @@ pub const Token = struct {
 
     pub fn format(self: Token, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("Token(line: {d:2}, tag: {f})", .{ self.line, self.tag });
-    }
-    pub fn lexeme(self: Token) []const u8 {
-        return self.tag.lexeme();
     }
 };

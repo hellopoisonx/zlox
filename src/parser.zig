@@ -4,19 +4,21 @@ const expr = @import("expr.zig");
 const diagnose = @import("diagnose.zig");
 const stmt = @import("stmt.zig");
 
-/// Recursive-descent parser for the chapter 8 grammar (§8.1–8.2):
+/// Recursive-descent parser for the chapter 8 grammar (§8.1–§8.5):
 ///
 ///   program     → declaration* EOF ;
 ///   declaration → varDecl | statement ;
 ///   varDecl     → "var" IDENTIFIER ( "=" expression )? ";" ;
-///   statement   → exprStmt | printStmt ;
+///   statement   → exprStmt | printStmt | block ;
 ///   exprStmt    → expression ";" ;
 ///   printStmt   → "print" expression ";" ;
+///   block       → "{" declaration* "}" ;
 ///
-/// on top of the chapter 6 expression grammar, with `primary` gaining
-/// IDENTIFIER (§8.2.1):
+/// on top of the chapter 6 expression grammar, with `assignment` slotting
+/// in above `equality` (§8.4) and `primary` gaining IDENTIFIER (§8.2.1):
 ///
-///   expression → equality ;
+///   expression → assignment ;
+///   assignment → IDENTIFIER "=" assignment | equality ;
 ///   equality   → comparison ( ( "!=" | "==" ) comparison )* ;
 ///   comparison → term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
 ///   term       → factor ( ( "-" | "+" ) factor )* ;
@@ -104,7 +106,30 @@ pub const Parser = struct {
         if (self.match(.{.print})) {
             return self.printStatement();
         }
+        if (self.match(.{.l_brace})) {
+            return self.blockStatement();
+        }
         return self.expressionStatement();
+    }
+
+    fn blockStatement(self: *Parser) Error!*stmt.Stmt {
+        const stmts = try self.block();
+        return try stmt.Stmt.create(self.allocator, .{ .block = .init(stmts) });
+    }
+
+    fn block(self: *Parser) Error![]const *stmt.Stmt {
+        var list = std.ArrayList(*stmt.Stmt).empty;
+
+        // The explicit atEnd() check keeps a missing '}' from looping
+        // forever; a declaration that hit a syntax error recovered to null
+        // (its diagnostic is already recorded) and is skipped, just as
+        // parse() does at the top level.
+        while (!self.check(.r_brace) and !self.atEnd()) {
+            if (try self.declaration()) |s| try list.append(self.allocator, s);
+        }
+
+        _ = try self.consume(.r_brace, "Expect '}' after block.");
+        return list.toOwnedSlice(self.allocator);
     }
 
     /// Book §8.1.2: `printStmt → "print" expression ";"`. The `print`
@@ -141,7 +166,10 @@ pub const Parser = struct {
                     );
                 },
                 else => {
-                    try self.reportError(equals, "Invalid assignment target.");
+                    // Book §8.4: report but do not throw — the parser is
+                    // not in a confused state, so it keeps consuming this
+                    // statement (e.g. still reports a missing ';').
+                    try self.errorAt(equals, "Invalid assignment target.");
                 },
             }
         }
@@ -275,16 +303,18 @@ pub const Parser = struct {
     }
 
     /// Book §6.3.2: `error(token, message)` — record a Diagnostic with the
-    /// token's location and hand back `error.Parse` for the caller to
-    /// unwind with.
-    fn reportError(self: *Parser, tok: token.Token, message: []const u8) Error!void {
+    /// token's location, without unwinding. `consume`/`primary` wrap this
+    /// in `reportError`; `assignment` uses it alone, since the book's
+    /// invalid-target error does not throw (the parser is not confused and
+    /// must keep parsing).
+    fn errorAt(self: *Parser, tok: token.Token, message: []const u8) Error!void {
         const located = if (std.meta.activeTag(tok.tag) == .eof)
             std.fmt.allocPrint(self.allocator, "at end: {s}", .{message}) catch message
         else
             std.fmt.allocPrint(
                 self.allocator,
                 "at '{s}': {s}",
-                .{ tok.lexeme(), message },
+                .{ tok.lexeme, message },
             ) catch message;
 
         const diag = try diagnose.Diagnostic.create(
@@ -295,7 +325,12 @@ pub const Parser = struct {
             null,
         );
         try self.diagnostics.append(self.allocator, diag);
+    }
 
+    /// `errorAt` plus the ParseError unwind — the book's
+    /// `throw error(token, message)`.
+    fn reportError(self: *Parser, tok: token.Token, message: []const u8) Error!void {
+        try self.errorAt(tok, message);
         return error.Parse;
     }
 

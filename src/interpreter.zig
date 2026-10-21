@@ -120,17 +120,26 @@ pub const RuntimeError = struct {
 pub const Interpreter = struct {
     runtime_error: ?RuntimeError = null,
     allocator: std.mem.Allocator,
-    environment: Environment,
+    /// The *current* environment (book §8.5): the innermost scope's store.
+    /// A pointer because block environments are arena nodes in the
+    /// enclosing chain — copying an `Environment` by value would alias its
+    /// `StringHashMapUnmanaged` buckets and self-link the chain.
+    environment: *Environment,
 
-    pub const EvalError = error{RuntimeError} || std.mem.Allocator.Error || environment.Environment.Error;
+    pub const EvalError = error{RuntimeError} || std.mem.Allocator.Error;
     /// Errors from executing statements: evaluation plus the stdout
     /// writes that `print` statements make.
     pub const ExecError = EvalError || std.Io.Writer.Error;
 
-    pub fn init(allocator: std.mem.Allocator) Interpreter {
+    /// Book §8.3: the interpreter owns one global environment for its own
+    /// lifetime — a script run or the whole REPL session (jlox's static
+    /// interpreter) — allocated in the caller's arena.
+    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Interpreter {
+        const global = try allocator.create(Environment);
+        global.* = Environment.init(allocator);
         return .{
             .allocator = allocator,
-            .environment = Environment.init(allocator),
+            .environment = global,
         };
     }
 
@@ -161,12 +170,12 @@ pub const Interpreter = struct {
         switch (s.*) {
             // Expression statement: evaluate for side effects, discard
             // the value (book §8.1.3).
-            .expression => |st| _ = try self.evaluate(self.allocator, st.expression),
+            .expression => |st| _ = try self.evaluate(st.expression),
 
             // Print statement: stringify the value, then dump it to
             // stdout (book §8.1.3).
             .print => |st| {
-                const value = try self.evaluate(self.allocator, st.expression);
+                const value = try self.evaluate(st.expression);
                 const text = try value.stringify(self.allocator);
                 try stdout.print("{s}\n", .{text});
             },
@@ -177,24 +186,52 @@ pub const Interpreter = struct {
             .var_decl => |st| {
                 var value: Value = .nil;
                 if (st.initializer) |initializer| {
-                    value = try self.evaluate(self.allocator, initializer);
+                    value = try self.evaluate(initializer);
                 }
-                try self.environment.define(st.name.lexeme(), value);
+                try self.environment.define(st.name.lexeme, value);
             },
+
+            // Book §8.5 visitBlock: each block runs in a fresh environment
+            // whose enclosing link is the current one, so declarations
+            // inside vanish on exit and outer names stay visible.
+            .block => |b| {
+                const block_env = try self.allocator.create(Environment);
+                block_env.* = Environment.initEnclosing(self.allocator, self.environment);
+                try self.executeBlock(b.statements, block_env, stdout);
+            },
+        }
+    }
+
+    /// Book §8.5 `executeBlock`: swap the interpreter's environment for the
+    /// block's, run the statements, then restore — the `defer` is the
+    /// port of the book's `finally`, so a runtime error still unwinds to
+    /// the enclosing scope.
+    fn executeBlock(
+        self: *Interpreter,
+        statements: []const *stmt.Stmt,
+        env: *Environment,
+        stdout: *std.Io.Writer,
+    ) ExecError!void {
+        const previous = self.environment;
+        defer self.environment = previous;
+        self.environment = env;
+
+        for (statements) |s| {
+            try self.execute(s, stdout);
         }
     }
 
     /// Post-order traversal (book §7.2.3): each node evaluates its children
     /// before doing its own work.
-    fn evaluate(self: *Interpreter, allocator: std.mem.Allocator, e: *const expr.Expr) EvalError!Value {
+    fn evaluate(self: *Interpreter, e: *const expr.Expr) EvalError!Value {
         return switch (e.*) {
 
             // Book §8.3 visitVariableExpr: forward to the environment.
             // A miss is the book's "Undefined variable" RuntimeError —
             // deferred to runtime so a function body may refer to a
             // variable defined later (ch.10).
-            .variable => |v| self.environment.get(v.name.lexeme()) orelse
-                return self.runtimeErrorf(v.name, "Undefined variable '{s}'.", .{v.name.lexeme()}),
+            .variable => |v| self.environment.get(v.name.lexeme) orelse
+                return self.runtimeErrorf(v.name, "Undefined variable '{s}'.", .{v.name.lexeme}),
             // §7.2.1: a literal is syntax that already holds its runtime
             // value; evaluation just unwraps it.
             .literal => |lit| switch (lit) {
@@ -205,11 +242,11 @@ pub const Interpreter = struct {
             },
 
             // §7.2.2: parentheses group without computing anything.
-            .grouping => |g| self.evaluate(allocator, g.expression),
+            .grouping => |g| self.evaluate(g.expression),
 
             // §7.2.3: evaluate the operand first, then apply the operator.
             .unary => |u| blk: {
-                const right = try self.evaluate(allocator, u.right);
+                const right = try self.evaluate(u.right);
                 break :blk switch (u.op.tag) {
                     .minus => .{ .number = -(try self.checkNumberOperand(u.op, right)) },
                     .bang => .{ .boolean = !isTruthy(right) },
@@ -222,8 +259,8 @@ pub const Interpreter = struct {
             // semantics per the book's "left" aside — and both before
             // either operand's type is checked (the "operand" aside, §7.3.1).
             .binary => |b| blk: {
-                const left = try self.evaluate(allocator, b.left);
-                const right = try self.evaluate(allocator, b.right);
+                const left = try self.evaluate(b.left);
+                const right = try self.evaluate(b.right);
                 break :blk switch (b.op.tag) {
                     .minus, .slash, .star => blk2: {
                         const n = try self.checkNumberOperands(b.op, left, right);
@@ -241,7 +278,7 @@ pub const Interpreter = struct {
                             break :blk .{ .number = left.number + right.number };
                         }
                         if (std.meta.activeTag(left) == .string and std.meta.activeTag(right) == .string) {
-                            const joined = try std.mem.concat(allocator, u8, &.{ left.string, right.string });
+                            const joined = try std.mem.concat(self.allocator, u8, &.{ left.string, right.string });
                             break :blk .{ .string = joined };
                         }
                         return self.runtimeError(b.op, "Operands must be two numbers or two strings.");
@@ -266,9 +303,15 @@ pub const Interpreter = struct {
                     else => unreachable,
                 };
             },
+            // Book §8.4 visitAssignExpr: evaluate the value, then store it
+            // in the named variable; the expression's value is the assigned
+            // one. Assignment never creates a binding — a miss at the root
+            // environment is the book's "Undefined variable" RuntimeError.
             .assign => |a| blk: {
-                const value = try self.evaluate(self.allocator, a.value);
-                try self.environment.assign(a.name, value);
+                const value = try self.evaluate(a.value);
+                self.environment.assign(a.name, value) catch |err| switch (err) {
+                    error.UndefinedVariable => return self.runtimeErrorf(a.name, "Undefined variable '{s}'.", .{a.name.lexeme}),
+                };
                 break :blk value;
             },
         };
@@ -317,17 +360,18 @@ pub const Interpreter = struct {
 /// Different types are never equal (no NullPointerException on `nil` —
 /// handled by the tag switch). Strings compare by content (Java's
 /// `String.equals`; clox gets the same via interning). Numbers follow
-/// Java's `Double.equals`, so NaN == NaN and 0 == -0 is false — Lox does
-/// NOT follow IEEE 754 here (book's "nan" aside).
+/// Java's `Double.equals`: it compares `doubleToLongBits`, so every NaN
+/// equals every other NaN (the book's "nan" aside: Lox does NOT follow
+/// IEEE 754) and +0.0 does NOT equal -0.0.
 fn checkEqual(a: Value, b: Value) bool {
     return switch (a) {
         .nil => std.meta.activeTag(b) == .nil,
-        // Bit comparison is Java's Double.equals: NaN equals NaN, and
-        // +0.0 does NOT equal -0.0. Every NaN the interpreter can
-        // produce (0/0 and friends) carries the same canonical bit
-        // pattern, so bit equality matches doubleToLongBits.
         .number => |x| switch (b) {
-            .number => |y| @as(u64, @bitCast(x)) == @as(u64, @bitCast(y)),
+            // doubleToLongBits canonicalizes all NaN payloads/signs to
+            // one bit pattern, hence the isNan check before the bit
+            // comparison.
+            .number => |y| (std.math.isNan(x) and std.math.isNan(y)) or
+                @as(u64, @bitCast(x)) == @as(u64, @bitCast(y)),
             else => false,
         },
         .boolean => |x| switch (b) {
