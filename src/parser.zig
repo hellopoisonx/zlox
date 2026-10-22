@@ -92,7 +92,9 @@ pub const Parser = struct {
     /// The book catches here and returns null; the port does the same
     /// (parse() then skips it — diagnostics already gate execution).
     fn declaration(self: *Parser) Error!?*stmt.Stmt {
-        const declared: Error!*stmt.Stmt = if (self.match(.{.fun}))
+        const declared: Error!*stmt.Stmt = if (self.match(.{.class}))
+            self.classDeclaration()
+        else if (self.match(.{.fun}))
             self.function("function")
         else if (self.match(.{._var}))
             self.varDeclaration()
@@ -122,11 +124,23 @@ pub const Parser = struct {
         return try stmt.Stmt.create(self.allocator, .{ .var_decl = .init(name, initializer) });
     }
 
-    /// Book §10.3: `funDecl → "fun" function ;` and
-    /// `function → IDENTIFIER "(" parameters? ")" block ;`. The `fun`
-    /// keyword is already consumed. `kind` is comptime because it only
-    /// feeds error messages — ch.12 reuses this for class methods.
-    fn function(self: *Parser, comptime kind: []const u8) Error!*stmt.Stmt {
+    /// Book §12.2: `classDecl → "class" IDENTIFIER "{" function* "}" ;`.
+    fn classDeclaration(self: *Parser) Error!*stmt.Stmt {
+        const name = try self.consume(.identifier_literal, "Expect class name.");
+        _ = try self.consume(.l_brace, "Expect '{' before class body.");
+
+        var methods: std.ArrayList(stmt.Function) = .empty;
+        while (!self.check(.r_brace) and !self.atEnd()) {
+            try methods.append(self.allocator, try self.functionDecl("method"));
+        }
+
+        _ = try self.consume(.r_brace, "Expect '}' after class body.");
+        return try stmt.Stmt.create(self.allocator, .{
+            .class = .init(name, try methods.toOwnedSlice(self.allocator)),
+        });
+    }
+
+    fn functionDecl(self: *Parser, comptime kind: []const u8) Error!stmt.Function {
         const name = try self.consume(
             .identifier_literal,
             std.fmt.comptimePrint("Expect {s} name.", .{kind}),
@@ -139,8 +153,6 @@ pub const Parser = struct {
         var parameters: std.ArrayList(token.Token) = .empty;
         if (!self.check(.r_paren)) {
             while (true) {
-                // Book §10.3: report but do not throw — the parser is
-                // still in a valid state and keeps collecting parameters.
                 if (parameters.items.len >= 255) {
                     try self.errorAt(self.peek(), "Can't have more than 255 parameters.");
                 }
@@ -154,17 +166,17 @@ pub const Parser = struct {
         }
         _ = try self.consume(.r_paren, "Expect ')' after parameters.");
 
-        // Book §10.3: consume `{` here (block() assumes it was already
-        // matched) so a missing brace is reported in the context of a
-        // function declaration.
         _ = try self.consume(
             .l_brace,
             std.fmt.comptimePrint("Expect '{{' before {s} body.", .{kind}),
         );
         const body = try self.block();
+        return stmt.Function.init(name, try parameters.toOwnedSlice(self.allocator), body);
+    }
 
+    fn function(self: *Parser, comptime kind: []const u8) Error!*stmt.Stmt {
         return try stmt.Stmt.create(self.allocator, .{
-            .function = .init(name, try parameters.toOwnedSlice(self.allocator), body),
+            .function = try self.functionDecl(kind),
         });
     }
 
@@ -366,10 +378,13 @@ pub const Parser = struct {
                         .{ .assign = .init(v.name, value) },
                     );
                 },
+                .get => |g| {
+                    return try expr.Expr.create(
+                        self.allocator,
+                        .{ .set = .init(g.object, g.name, value) },
+                    );
+                },
                 else => {
-                    // Book §8.4: report but do not throw — the parser is
-                    // not in a confused state, so it keeps consuming this
-                    // statement (e.g. still reports a missing ';').
                     try self.errorAt(equals, "Invalid assignment target.");
                 },
             }
@@ -477,8 +492,17 @@ pub const Parser = struct {
     fn call(self: *Parser) Error!*expr.Expr {
         var e: *expr.Expr = try self.primary();
 
-        while (self.match(.{.l_paren})) {
-            e = try self.finishCall(e);
+        while (true) {
+            if (self.match(.{.l_paren})) {
+                e = try self.finishCall(e);
+            } else if (self.match(.{.dot})) {
+                const name = try self.consume(.identifier_literal, "Expect property name after '.'.");
+                e = try expr.Expr.create(self.allocator, .{
+                    .get = .init(e, name),
+                });
+            } else {
+                break;
+            }
         }
 
         return e;
@@ -555,6 +579,13 @@ pub const Parser = struct {
             const grouped = try self.expression();
             _ = try self.consume(.r_paren, "Expect ')' after expression.");
             return try expr.Expr.create(self.allocator, .{ .grouping = .init(grouped) });
+        }
+
+        if (self.match(.{.this})) {
+            return try expr.Expr.create(
+                self.allocator,
+                .{ .this = .init(self.previous()) },
+            );
         }
 
         // Sitting on a token that can't start an expression (book §6.4,

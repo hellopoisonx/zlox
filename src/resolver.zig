@@ -16,10 +16,18 @@ pub const Resolver = struct {
     scopes: std.ArrayList(std.StringHashMapUnmanaged(bool)) = .empty,
     diagnostics: std.ArrayList(*diagnose.Diagnostic) = .empty,
     current_function: FunctionType = .none,
+    current_class: ClassType = .none,
+
+    pub const ClassType = enum {
+        none,
+        class,
+    };
 
     pub const FunctionType = enum {
         none,
         function,
+        initializer,
+        method,
     };
     pub const Error = std.mem.Allocator.Error;
 
@@ -65,7 +73,12 @@ pub const Resolver = struct {
                 if (self.current_function == .none) {
                     try self.errorAt(r.keyword, "Can't return from top-level code.");
                 }
-                if (r.value) |v| try self.resolveExpr(v);
+                if (r.value) |v| {
+                    if (self.current_function == .initializer) {
+                        try self.errorAt(r.keyword, "Can't return a value from an initializer.");
+                    }
+                    try self.resolveExpr(v);
+                }
             },
 
             // Declare -> resolve initializer -> define.
@@ -81,6 +94,28 @@ pub const Resolver = struct {
             ._while => |w| {
                 try self.resolveExpr(w.cond);
                 try self.resolveStmt(w.body);
+            },
+            .class => |c| {
+                const enclosing_class = self.current_class;
+                self.current_class = .class;
+                defer self.current_class = enclosing_class;
+
+                try self.declare(c.name);
+                try self.define(c.name);
+
+                try self.beginScope();
+                const scope = &self.scopes.items[self.scopes.items.len - 1];
+                try scope.put(self.allocator, "this", true);
+
+                for (c.methods) |method| {
+                    var declaration: FunctionType = .method;
+                    if (std.mem.eql(u8, method.name.lexeme, "init")) {
+                        declaration = .initializer;
+                    }
+                    try self.resolveFunction(method, declaration);
+                }
+
+                self.endScope();
             },
         }
     }
@@ -130,6 +165,21 @@ pub const Resolver = struct {
                     }
                 }
                 try self.resolveLocal(e, v.name);
+            },
+
+            .get => |g| try self.resolveExpr(g.object),
+
+            .set => |s| {
+                try self.resolveExpr(s.value);
+                try self.resolveExpr(s.object);
+            },
+
+            .this => |th| {
+                if (self.current_class == .none) {
+                    try self.errorAt(th.keyword, "Can't use 'this' outside of a class.");
+                    return;
+                }
+                try self.resolveLocal(e, th.keyword);
             },
         }
     }

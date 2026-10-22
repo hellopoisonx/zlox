@@ -23,7 +23,9 @@ pub const Expr = union(enum) {
     unary: Unary,
     variable: Variable,
     assign: Assign,
-
+    get: Get,
+    set: Set,
+    this: This,
     /// Heap-allocate `expr` as a node, for use in child edges.
     pub fn create(allocator: std.mem.Allocator, expr: Expr) std.mem.Allocator.Error!*Expr {
         const node = try allocator.create(Expr);
@@ -128,4 +130,34 @@ pub const Literal = union(enum) {
     string: []const u8,
     boolean: bool,
     nil,
+};
+
+/// Book §12.4 `Expr.Get`: property access on an object.
+pub const Get = struct {
+    object: *Expr,
+    name: token.Token,
+
+    pub fn init(object: *Expr, name: token.Token) Get {
+        return .{ .object = object, .name = name };
+    }
+};
+
+/// Book §12.4 `Expr.Set`: property assignment on an object.
+pub const Set = struct {
+    object: *Expr,
+    name: token.Token,
+    value: *Expr,
+
+    pub fn init(object: *Expr, name: token.Token, value: *Expr) Set {
+        return .{ .object = object, .name = name, .value = value };
+    }
+};
+
+/// Book §12.6 `Expr.This`: access to the current instance inside a method.
+pub const This = struct {
+    keyword: token.Token,
+
+    pub fn init(keyword: token.Token) This {
+        return .{ .keyword = keyword };
+    }
 };

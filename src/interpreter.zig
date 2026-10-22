@@ -13,6 +13,7 @@ pub const Value = union(enum) {
     string: []const u8,
     /// Callable pointer (user function or native).
     callable: *callable.Callable,
+    instance: *callable.Instance,
     nil,
 
     fn stringify(self: Value, allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
@@ -23,6 +24,7 @@ pub const Value = union(enum) {
             // or arena concat); no copy needed.
             .string => |s| s,
             .callable => |c| try c.stringify(allocator),
+            .instance => |i| try i.stringify(allocator),
             .nil => "nil",
         };
     }
@@ -182,7 +184,7 @@ pub const Interpreter = struct {
             // Book §10.4 visitFunctionStmt: wrap declaration and environment into callable.
             .function => |f| {
                 const closure = try self.allocator.create(callable.Callable);
-                closure.* = .{ .function = .init(f, self.environment) };
+                closure.* = .{ .function = .init(f, self.environment, false) };
                 try self.environment.define(f.name.lexeme, .{ .callable = closure });
             },
 
@@ -237,6 +239,26 @@ pub const Interpreter = struct {
                 while (isTruthy(try self.evaluate(w.cond))) {
                     try self.execute(w.body);
                 }
+            },
+            .class => |c| {
+                try self.environment.define(c.name.lexeme, .nil);
+
+                var methods: std.StringHashMapUnmanaged(callable.LoxFunction) = .empty;
+                for (c.methods) |method| {
+                    const is_init = std.mem.eql(u8, method.name.lexeme, "init");
+                    const fn_obj = callable.LoxFunction.init(method, self.environment, is_init);
+                    try methods.put(self.allocator, method.name.lexeme, fn_obj);
+                }
+
+                const klass = try self.allocator.create(callable.LoxClass);
+                klass.* = callable.LoxClass.init(c.name, methods);
+
+                const call_obj = try self.allocator.create(callable.Callable);
+                call_obj.* = .{ .class = klass };
+
+                self.environment.assign(c.name, .{ .callable = call_obj }) catch |err| switch (err) {
+                    error.UndefinedVariable => unreachable,
+                };
             },
         }
     }
@@ -379,6 +401,28 @@ pub const Interpreter = struct {
                 }
                 break :blk value;
             },
+
+            .get => |g| blk: {
+                const object = try self.evaluate(g.object);
+                switch (object) {
+                    .instance => |inst| break :blk try inst.get(self, g.name),
+                    else => return self.runtimeError(g.name, "Only instances have properties."),
+                }
+            },
+
+            .set => |s| blk: {
+                const object = try self.evaluate(s.object);
+                const inst = switch (object) {
+                    .instance => |i| i,
+                    else => return self.runtimeError(s.name, "Only instances have fields."),
+                };
+
+                const value = try self.evaluate(s.value);
+                try inst.set(s.name, value);
+                break :blk value;
+            },
+
+            .this => |th| try self.lookUpVariable(th.keyword, e),
         };
     }
 
@@ -399,14 +443,14 @@ pub const Interpreter = struct {
     /// parks on the interpreter because Zig errors carry only a tag;
     /// `error.RuntimeError` unwinds the recursive evaluate() calls exactly
     /// like the Java exception.
-    fn runtimeError(self: *Interpreter, tok: token.Token, message: []const u8) EvalError {
+    pub fn runtimeError(self: *Interpreter, tok: token.Token, message: []const u8) EvalError {
         self.runtime_error = .{ .token = tok, .message = message };
         return error.RuntimeError;
     }
 
     /// `runtimeError` with an allocated, formatted message — the
     /// "Undefined variable '<name>'." report interpolates the name.
-    fn runtimeErrorf(self: *Interpreter, tok: token.Token, comptime fmt: []const u8, args: anytype) EvalError {
+    pub fn runtimeErrorf(self: *Interpreter, tok: token.Token, comptime fmt: []const u8, args: anytype) EvalError {
         const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return error.OutOfMemory;
         return self.runtimeError(tok, message);
     }
@@ -466,6 +510,10 @@ fn checkEqual(a: Value, b: Value) bool {
             .callable => |y| x == y,
             else => false,
         },
+        .instance => |x| switch (b) {
+            .instance => |y| x == y,
+            else => false,
+        },
     };
 }
 
@@ -475,7 +523,7 @@ fn isTruthy(v: Value) bool {
     return switch (v) {
         .boolean => |b| b,
         .nil => false,
-        .number, .string, .callable => true,
+        .number, .string, .callable, .instance => true,
     };
 }
 

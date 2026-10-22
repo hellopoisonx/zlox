@@ -20,7 +20,7 @@ pub const Stmt = union(enum) {
     block: Block,
     _if: If,
     _while: While,
-
+    class: Class,
     /// Heap-allocate `stmt` as a node, for use in statement lists.
     pub fn create(allocator: std.mem.Allocator, stmt: Stmt) std.mem.Allocator.Error!*Stmt {
         const node = try allocator.create(Stmt);
@@ -130,6 +130,19 @@ pub const Var = struct {
         return .{
             .name = name,
             .initializer = initializer,
+        };
+    }
+};
+
+/// Book §12.2 `Stmt.Class`: class declaration with a name and a list of methods.
+pub const Class = struct {
+    name: token.Token,
+    methods: []const Function,
+
+    pub fn init(name: token.Token, methods: []const Function) Class {
+        return .{
+            .name = name,
+            .methods = methods,
         };
     }
 };
