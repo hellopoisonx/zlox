@@ -26,6 +26,7 @@ pub const Expr = union(enum) {
     get: Get,
     set: Set,
     this: This,
+    super: Super,
     /// Heap-allocate `expr` as a node, for use in child edges.
     pub fn create(allocator: std.mem.Allocator, expr: Expr) std.mem.Allocator.Error!*Expr {
         const node = try allocator.create(Expr);
@@ -159,5 +160,18 @@ pub const This = struct {
 
     pub fn init(keyword: token.Token) This {
         return .{ .keyword = keyword };
+    }
+};
+
+/// Book §13.3 `Expr.Super`: super.method access expression.
+pub const Super = struct {
+    keyword: token.Token,
+    method: token.Token,
+
+    pub fn init(keyword: token.Token, method: token.Token) Super {
+        return .{
+            .keyword = keyword,
+            .method = method,
+        };
     }
 };

@@ -241,7 +241,30 @@ pub const Interpreter = struct {
                 }
             },
             .class => |c| {
+                var superclass: ?*callable.LoxClass = null;
+                var super_val: ?Value = null;
+                if (c.superclass) |sc| {
+                    const evaluated = try self.evaluate(sc);
+                    switch (evaluated) {
+                        .callable => |call_obj| switch (call_obj.*) {
+                            .class => |klass| {
+                                superclass = klass;
+                                super_val = evaluated;
+                            },
+                            else => return self.runtimeError(sc.variable.name, "Superclass must be a class."),
+                        },
+                        else => return self.runtimeError(sc.variable.name, "Superclass must be a class."),
+                    }
+                }
+
                 try self.environment.define(c.name.lexeme, .nil);
+
+                if (c.superclass != null) {
+                    const super_env = try self.allocator.create(Environment);
+                    super_env.* = Environment.initEnclosing(self.allocator, self.environment);
+                    try super_env.define("super", super_val.?);
+                    self.environment = super_env;
+                }
 
                 var methods: std.StringHashMapUnmanaged(callable.LoxFunction) = .empty;
                 for (c.methods) |method| {
@@ -251,7 +274,11 @@ pub const Interpreter = struct {
                 }
 
                 const klass = try self.allocator.create(callable.LoxClass);
-                klass.* = callable.LoxClass.init(c.name, methods);
+                klass.* = callable.LoxClass.init(c.name, superclass, methods);
+
+                if (c.superclass != null) {
+                    self.environment = self.environment.enclosing.?;
+                }
 
                 const call_obj = try self.allocator.create(callable.Callable);
                 call_obj.* = .{ .class = klass };
@@ -423,6 +450,21 @@ pub const Interpreter = struct {
             },
 
             .this => |th| try self.lookUpVariable(th.keyword, e),
+
+            .super => |su| blk: {
+                const distance = self.locals.get(e).?;
+                const super_val = self.environment.getAt(distance, "super").?;
+                const superclass = super_val.callable.class;
+
+                const this_val = self.environment.getAt(distance - 1, "this").?;
+                const object = this_val.instance;
+
+                const method = superclass.findMethod(su.method.lexeme) orelse
+                    return self.runtimeErrorf(su.method, "Undefined property '{s}'.", .{su.method.lexeme});
+
+                const bound = try method.bind(self.allocator, object);
+                break :blk .{ .callable = bound };
+            },
         };
     }
 

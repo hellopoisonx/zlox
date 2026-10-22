@@ -21,6 +21,7 @@ pub const Resolver = struct {
     pub const ClassType = enum {
         none,
         class,
+        subclass,
     };
 
     pub const FunctionType = enum {
@@ -103,6 +104,18 @@ pub const Resolver = struct {
                 try self.declare(c.name);
                 try self.define(c.name);
 
+                if (c.superclass) |superclass| {
+                    if (std.mem.eql(u8, c.name.lexeme, superclass.variable.name.lexeme)) {
+                        try self.errorAt(superclass.variable.name, "A class can't inherit from itself.");
+                    }
+                    self.current_class = .subclass;
+                    try self.resolveExpr(superclass);
+
+                    try self.beginScope();
+                    const super_scope = &self.scopes.items[self.scopes.items.len - 1];
+                    try super_scope.put(self.allocator, "super", true);
+                }
+
                 try self.beginScope();
                 const scope = &self.scopes.items[self.scopes.items.len - 1];
                 try scope.put(self.allocator, "this", true);
@@ -116,6 +129,10 @@ pub const Resolver = struct {
                 }
 
                 self.endScope();
+
+                if (c.superclass != null) {
+                    self.endScope();
+                }
             },
         }
     }
@@ -180,6 +197,14 @@ pub const Resolver = struct {
                     return;
                 }
                 try self.resolveLocal(e, th.keyword);
+            },
+            .super => |su| {
+                if (self.current_class == .none) {
+                    try self.errorAt(su.keyword, "Can't use 'super' outside of a class.");
+                } else if (self.current_class != .subclass) {
+                    try self.errorAt(su.keyword, "Can't use 'super' in a class with no superclass.");
+                }
+                try self.resolveLocal(e, su.keyword);
             },
         }
     }

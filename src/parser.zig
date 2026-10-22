@@ -124,9 +124,18 @@ pub const Parser = struct {
         return try stmt.Stmt.create(self.allocator, .{ .var_decl = .init(name, initializer) });
     }
 
-    /// Book §12.2: `classDecl → "class" IDENTIFIER "{" function* "}" ;`.
+    /// Book §12.2 / §13.1: `classDecl → "class" IDENTIFIER ( "<" IDENTIFIER )? "{" function* "}" ;`.
     fn classDeclaration(self: *Parser) Error!*stmt.Stmt {
         const name = try self.consume(.identifier_literal, "Expect class name.");
+
+        var superclass: ?*expr.Expr = null;
+        if (self.match(.{.less})) {
+            _ = try self.consume(.identifier_literal, "Expect superclass name.");
+            superclass = try expr.Expr.create(self.allocator, .{
+                .variable = .init(self.previous()),
+            });
+        }
+
         _ = try self.consume(.l_brace, "Expect '{' before class body.");
 
         var methods: std.ArrayList(stmt.Function) = .empty;
@@ -136,7 +145,7 @@ pub const Parser = struct {
 
         _ = try self.consume(.r_brace, "Expect '}' after class body.");
         return try stmt.Stmt.create(self.allocator, .{
-            .class = .init(name, try methods.toOwnedSlice(self.allocator)),
+            .class = .init(name, superclass, try methods.toOwnedSlice(self.allocator)),
         });
     }
 
@@ -579,6 +588,15 @@ pub const Parser = struct {
             const grouped = try self.expression();
             _ = try self.consume(.r_paren, "Expect ')' after expression.");
             return try expr.Expr.create(self.allocator, .{ .grouping = .init(grouped) });
+        }
+        if (self.match(.{.super})) {
+            const keyword = self.previous();
+            _ = try self.consume(.dot, "Expect '.' after 'super'.");
+            const method = try self.consume(.identifier_literal, "Expect superclass method name.");
+            return try expr.Expr.create(
+                self.allocator,
+                .{ .super = .init(keyword, method) },
+            );
         }
 
         if (self.match(.{.this})) {

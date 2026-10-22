@@ -121,20 +121,28 @@ pub const LoxFunction = struct {
     }
 };
 
-/// Book §12.3 LoxClass: runtime representation of a class.
+/// Book §12.3 / §13.2 LoxClass: runtime representation of a class.
 pub const LoxClass = struct {
     name: Token,
+    superclass: ?*const LoxClass = null,
     methods: std.StringHashMapUnmanaged(LoxFunction),
 
-    pub fn init(name: Token, methods: std.StringHashMapUnmanaged(LoxFunction)) LoxClass {
+    pub fn init(name: Token, superclass: ?*const LoxClass, methods: std.StringHashMapUnmanaged(LoxFunction)) LoxClass {
         return .{
             .name = name,
+            .superclass = superclass,
             .methods = methods,
         };
     }
 
     pub fn findMethod(self: *const LoxClass, name: []const u8) ?LoxFunction {
-        return self.methods.get(name);
+        if (self.methods.get(name)) |method| {
+            return method;
+        }
+        if (self.superclass) |superclass| {
+            return superclass.findMethod(name);
+        }
+        return null;
     }
 
     pub fn arity(self: *const LoxClass) usize {

@@ -134,14 +134,16 @@ pub const Var = struct {
     }
 };
 
-/// Book §12.2 `Stmt.Class`: class declaration with a name and a list of methods.
+/// Book §12.2 / §13.1 `Stmt.Class`: class declaration with optional superclass and methods.
 pub const Class = struct {
     name: token.Token,
+    superclass: ?*expr.Expr,
     methods: []const Function,
 
-    pub fn init(name: token.Token, methods: []const Function) Class {
+    pub fn init(name: token.Token, superclass: ?*expr.Expr, methods: []const Function) Class {
         return .{
             .name = name,
+            .superclass = superclass,
             .methods = methods,
         };
     }
