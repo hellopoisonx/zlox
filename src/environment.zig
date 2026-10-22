@@ -5,13 +5,7 @@ const token = @import("token.zig");
 const Value = interpreter.Value;
 const Token = token.Token;
 
-/// The book §8.3 `Environment` class: the store that associates variable
-/// names with values — a name→value map pulled out of Interpreter because
-/// it forms a nicely delineated concept. Keys are bare strings (token
-/// lexemes), not tokens: every identifier token with the same text refers
-/// to the same variable. Lexemes borrow source text held by the caller's
-/// arena — a script run's arena, or the REPL session's arena so globals
-/// keep valid keys across lines.
+/// Environment associates variable names with runtime values.
 pub const Environment = struct {
     values: std.StringHashMapUnmanaged(Value) = .empty,
     allocator: std.mem.Allocator,
@@ -29,19 +23,12 @@ pub const Environment = struct {
         };
     }
 
-    /// Book §8.3 `define`: bind a name to a value — deliberately without
-    /// checking whether it's already present, so redefining a variable
-    /// with `var` is legal (the book keeps REPL and script rules the
-    /// same).
+    /// Defines or redefines a variable in this environment.
     pub fn define(self: *Environment, name: []const u8, value: Value) std.mem.Allocator.Error!void {
         try self.values.put(self.allocator, name, value);
     }
 
-    /// Book §8.3 `get`: look a name up. Null is the "not bound" answer —
-    /// the caller owns the token and raises the book's "Undefined
-    /// variable" RuntimeError; deferring to runtime (not parse time)
-    /// keeps referring to a not-yet-defined variable legal inside
-    /// function bodies (which arrive in ch.10).
+    /// Looks up a variable dynamically through enclosing environments.
     pub fn get(self: *Environment, name: []const u8) ?Value {
         if (self.values.get(name)) |v| return v;
         if (self.enclosing) |enc| {
@@ -50,10 +37,7 @@ pub const Environment = struct {
         return null;
     }
 
-    /// Book §8.5's enclosing-aware `assign`: assignment is not allowed to
-    /// create a variable, so a miss at the root is `error.UndefinedVariable`
-    /// — the interpreter owns the token and raises the book's "Undefined
-    /// variable '<name>'." RuntimeError.
+    /// Assigns to an existing variable in the innermost enclosing environment.
     pub fn assign(self: *Environment, name: Token, value: Value) Error!void {
         if (self.values.getPtr(name.lexeme)) |slot| {
             slot.* = value;
@@ -61,5 +45,29 @@ pub const Environment = struct {
         }
         if (self.enclosing) |enc| return enc.assign(name, value);
         return error.UndefinedVariable;
+    }
+
+    /// Book §11.4.2 getAt: returns the variable value at fixed ancestor distance.
+    pub fn getAt(self: *Environment, distance: usize, name: []const u8) ?Value {
+        return self.ancestor(distance).values.get(name);
+    }
+
+    /// Book §11.4.2 assignAt: stores a new value in the ancestor environment.
+    pub fn assignAt(self: *Environment, distance: usize, name: Token, value: Value) std.mem.Allocator.Error!void {
+        const env = self.ancestor(distance);
+        if (env.values.getPtr(name.lexeme)) |slot| {
+            slot.* = value;
+            return;
+        }
+        try env.values.put(env.allocator, name.lexeme, value);
+    }
+
+    /// Book §11.4.2 ancestor: walks up the environment chain `distance` hops.
+    fn ancestor(self: *Environment, distance: usize) *Environment {
+        var env = self;
+        for (0..distance) |_| {
+            env = env.enclosing.?;
+        }
+        return env;
     }
 };

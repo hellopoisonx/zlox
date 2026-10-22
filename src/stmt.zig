@@ -9,10 +9,17 @@ const token = @import("token.zig");
 /// types stay finite, and nodes live in the run's arena.
 pub const Stmt = union(enum) {
     expression: Expression,
+    /// Book §10.3 `Stmt.Function`: a named declaration that, when
+    /// executed, creates a closure and binds it in the current scope.
+    function: Function,
     print: Print,
+    /// Book §10.5 `Stmt.Return`; `return` is a Zig keyword, hence the
+    /// leading underscore used elsewhere in this port.
+    _return: Return,
     var_decl: Var,
     block: Block,
     _if: If,
+    _while: While,
 
     /// Heap-allocate `stmt` as a node, for use in statement lists.
     pub fn create(allocator: std.mem.Allocator, stmt: Stmt) std.mem.Allocator.Error!*Stmt {
@@ -32,6 +39,51 @@ pub const If = struct {
             .cond = cond,
             .thenBranch = thenBranch,
             .elseBranch = elseBranch,
+        };
+    }
+};
+
+/// Book §9.4 `Stmt.While`: `while (condition) body`. The condition is
+/// re-evaluated before every iteration; nothing else is carried.
+pub const While = struct {
+    cond: *expr.Expr,
+    body: *Stmt,
+
+    pub fn init(cond: *expr.Expr, body: *Stmt) While {
+        return .{
+            .cond = cond,
+            .body = body,
+        };
+    }
+};
+
+/// Book §10.3 `Stmt.Function`: name, parameter-name tokens, and the body
+/// statements (always a braced block per the grammar). The syntax node is
+/// also the declaration that `LoxFunction` wraps at runtime.
+pub const Function = struct {
+    name: token.Token,
+    params: []const token.Token,
+    body: []const *Stmt,
+
+    pub fn init(name: token.Token, params: []const token.Token, body: []const *Stmt) Function {
+        return .{
+            .name = name,
+            .params = params,
+            .body = body,
+        };
+    }
+};
+
+/// Book §10.5 `Stmt.Return`: the keyword token locates runtime errors and
+/// the optional value (`return;` means `return nil;`).
+pub const Return = struct {
+    keyword: token.Token,
+    value: ?*expr.Expr,
+
+    pub fn init(keyword: token.Token, value: ?*expr.Expr) Return {
+        return .{
+            .keyword = keyword,
+            .value = value,
         };
     }
 };

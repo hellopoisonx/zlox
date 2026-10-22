@@ -3,18 +3,16 @@ const expr = @import("expr.zig");
 const token = @import("token.zig");
 const stmt = @import("stmt.zig");
 const environment = @import("environment.zig");
+const callable = @import("callable.zig");
 const Environment = environment.Environment;
 
-/// A runtime Lox value — the port of the book §7.1 `java.lang.Object` box.
-/// The tagged union takes Java's place: each variant is one Lox type, and
-/// the discriminant is the runtime answer to "which kind of value is this?".
-/// Scalars are stored inline by value; `string` borrows the scanner's
-/// source buffer — except strings created at runtime by `+`, which are
-/// allocated from the run's arena (see `Interpreter.interpret`).
+/// A runtime Lox value boxed as a tagged union.
 pub const Value = union(enum) {
     number: f64,
     boolean: bool,
     string: []const u8,
+    /// Callable pointer (user function or native).
+    callable: *callable.Callable,
     nil,
 
     fn stringify(self: Value, allocator: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
@@ -24,6 +22,7 @@ pub const Value = union(enum) {
             // The bytes already outlive this run (scanner source buffer
             // or arena concat); no copy needed.
             .string => |s| s,
+            .callable => |c| try c.stringify(allocator),
             .nil => "nil",
         };
     }
@@ -112,77 +111,102 @@ pub const RuntimeError = struct {
     message: []const u8,
 };
 
-/// The book's Interpreter class. The book's `throw new RuntimeError(...)`
-/// becomes two steps here: park the payload in `runtime_error`, then
-/// return `error.RuntimeError` — `try` at every call site replays the Java
-/// exception's stack unwind. The global environment (§8.3) lives here so
-/// bindings outlive any single statement.
+/// Interpreter executes syntax trees.
 pub const Interpreter = struct {
     runtime_error: ?RuntimeError = null,
     allocator: std.mem.Allocator,
-    /// The *current* environment (book §8.5): the innermost scope's store.
-    /// A pointer because block environments are arena nodes in the
-    /// enclosing chain — copying an `Environment` by value would alias its
-    /// `StringHashMapUnmanaged` buckets and self-link the chain.
+    io: std.Io,
+    stdout: *std.Io.Writer,
+    globals: *Environment,
     environment: *Environment,
+    /// Book §11.4.1 locals: maps local variable expressions to scope distance.
+    locals: std.AutoHashMapUnmanaged(*const expr.Expr, usize) = .empty,
+    return_value: Value = .nil,
+    call_depth: usize = 0,
 
-    pub const EvalError = error{RuntimeError} || std.mem.Allocator.Error;
-    /// Errors from executing statements: evaluation plus the stdout
-    /// writes that `print` statements make.
-    pub const ExecError = EvalError || std.Io.Writer.Error;
+    /// Evaluation can run function bodies (a call), which print, so
+    /// `Writer.Error` is part of the set. `Return` travels through this
+    /// error set but is always caught by `LoxFunction.call`.
+    pub const EvalError = error{ RuntimeError, Return } || std.mem.Allocator.Error || std.Io.Writer.Error;
+    /// Errors from executing statements: evaluation plus stdout writes.
+    pub const ExecError = EvalError;
 
     /// Book §8.3: the interpreter owns one global environment for its own
     /// lifetime — a script run or the whole REPL session (jlox's static
-    /// interpreter) — allocated in the caller's arena.
-    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Interpreter {
+    /// interpreter) — allocated in the caller's arena. Book §10.2: the
+    /// native `clock` is installed in that global scope at construction.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stdout: *std.Io.Writer,
+    ) std.mem.Allocator.Error!Interpreter {
         const global = try allocator.create(Environment);
         global.* = Environment.init(allocator);
+
+        const clock = try allocator.create(callable.Callable);
+        clock.* = .{ .native = .{ .arity = 0, .run = clockNative } };
+        try global.define("clock", .{ .callable = clock });
+
         return .{
             .allocator = allocator,
+            .io = io,
+            .stdout = stdout,
+            .globals = global,
             .environment = global,
         };
     }
 
-    /// Executes a whole program — statements in order (book §8.1.3's
-    /// `interpret(List<Stmt>)`). `stdout` receives `print` output, the
-    /// port of the book's `System.out.println` inside visitPrintStmt;
-    /// the caller owns flushing. On `error.RuntimeError`, `runtime_error`
-    /// holds the token and message for the caller to report (§7.4), and
-    /// the remaining statements do not run — the book wraps the whole
-    /// loop in one try block.
+    /// Executes a list of statements in order.
     pub fn interpret(
         self: *Interpreter,
         statements: []const *stmt.Stmt,
-        stdout: *std.Io.Writer,
     ) ExecError!void {
         for (statements) |s| {
-            try self.execute(s, stdout);
+            try self.execute(s);
         }
     }
 
-    /// The statement analogue of `evaluate` (book §8.1.3): dispatch one
-    /// statement node.
+    /// Book §11.4.1 resolve: records variable scope distance.
+    pub fn resolve(self: *Interpreter, e: *const expr.Expr, depth: usize) std.mem.Allocator.Error!void {
+        try self.locals.put(self.allocator, e, depth);
+    }
+
+    /// Executes a single statement.
     fn execute(
         self: *Interpreter,
         s: *const stmt.Stmt,
-        stdout: *std.Io.Writer,
     ) ExecError!void {
         switch (s.*) {
-            // Expression statement: evaluate for side effects, discard
-            // the value (book §8.1.3).
             .expression => |st| _ = try self.evaluate(st.expression),
 
-            // Print statement: stringify the value, then dump it to
-            // stdout (book §8.1.3).
+            // Book §10.4 visitFunctionStmt: wrap declaration and environment into callable.
+            .function => |f| {
+                const closure = try self.allocator.create(callable.Callable);
+                closure.* = .{ .function = .init(f, self.environment) };
+                try self.environment.define(f.name.lexeme, .{ .callable = closure });
+            },
+
+            // Book §8.1.3 visitPrintStmt: evaluate and print value.
             .print => |st| {
                 const value = try self.evaluate(st.expression);
                 const text = try value.stringify(self.allocator);
-                try stdout.print("{s}\n", .{text});
+                try self.stdout.print("{s}\n", .{text});
             },
 
-            // Book §8.3 visitVarStmt: evaluate the initializer if there
-            // is one; a variable without one holds nil. define() never
-            // checks for an existing binding, so redefinition is legal.
+            // Book §10.5 visitReturnStmt: evaluate value and unwind with error.Return.
+            ._return => |r| {
+                var value: Value = .nil;
+                if (r.value) |v| {
+                    value = try self.evaluate(v);
+                }
+                if (self.call_depth == 0) {
+                    return self.runtimeError(r.keyword, "Can't return from top-level code.");
+                }
+                self.return_value = value;
+                return error.Return;
+            },
+
+            // Book §8.3 visitVarStmt: evaluate initializer (or nil) and define variable.
             .var_decl => |st| {
                 var value: Value = .nil;
                 if (st.initializer) |initializer| {
@@ -191,57 +215,52 @@ pub const Interpreter = struct {
                 try self.environment.define(st.name.lexeme, value);
             },
 
-            // Book §8.5 visitBlock: each block runs in a fresh environment
-            // whose enclosing link is the current one, so declarations
-            // inside vanish on exit and outer names stay visible.
+            // Book §8.5 visitBlock: run statements in enclosed block environment.
             .block => |b| {
                 const block_env = try self.allocator.create(Environment);
                 block_env.* = Environment.initEnclosing(self.allocator, self.environment);
-                try self.executeBlock(b.statements, block_env, stdout);
+                try self.executeBlock(b.statements, block_env);
             },
 
             ._if => |i| {
                 if (isTruthy(try self.evaluate(i.cond))) {
-                    try self.execute(i.thenBranch, stdout);
+                    try self.execute(i.thenBranch);
                 } else if (i.elseBranch) |e| {
-                    try self.execute(e, stdout);
+                    try self.execute(e);
+                }
+            },
+
+            // Book §9.4 visitWhileStmt: re-evaluate the condition before
+            // every iteration, including the first. The body is any
+            // statement — the grammar does not require a block.
+            ._while => |w| {
+                while (isTruthy(try self.evaluate(w.cond))) {
+                    try self.execute(w.body);
                 }
             },
         }
     }
 
-    /// Book §8.5 `executeBlock`: swap the interpreter's environment for the
-    /// block's, run the statements, then restore — the `defer` is the
-    /// port of the book's `finally`, so a runtime error still unwinds to
-    /// the enclosing scope.
-    fn executeBlock(
+    /// Book §8.5 executeBlock: runs statements in given environment, then restores previous.
+    pub fn executeBlock(
         self: *Interpreter,
         statements: []const *stmt.Stmt,
         env: *Environment,
-        stdout: *std.Io.Writer,
     ) ExecError!void {
         const previous = self.environment;
         defer self.environment = previous;
         self.environment = env;
 
         for (statements) |s| {
-            try self.execute(s, stdout);
+            try self.execute(s);
         }
     }
 
-    /// Post-order traversal (book §7.2.3): each node evaluates its children
-    /// before doing its own work.
     fn evaluate(self: *Interpreter, e: *const expr.Expr) EvalError!Value {
         return switch (e.*) {
 
-            // Book §8.3 visitVariableExpr: forward to the environment.
-            // A miss is the book's "Undefined variable" RuntimeError —
-            // deferred to runtime so a function body may refer to a
-            // variable defined later (ch.10).
-            .variable => |v| self.environment.get(v.name.lexeme) orelse
-                return self.runtimeErrorf(v.name, "Undefined variable '{s}'.", .{v.name.lexeme}),
-            // §7.2.1: a literal is syntax that already holds its runtime
-            // value; evaluation just unwraps it.
+            // Book §11.4.2 visitVariableExpr: look up resolved local or fallback to global.
+            .variable => |v| try self.lookUpVariable(v.name, e),
             .literal => |lit| switch (lit) {
                 .number => |n| .{ .number = n },
                 .string => |s| .{ .string = s },
@@ -249,10 +268,31 @@ pub const Interpreter = struct {
                 .nil => .nil,
             },
 
-            // §7.2.2: parentheses group without computing anything.
             .grouping => |g| self.evaluate(g.expression),
 
-            // §7.2.3: evaluate the operand first, then apply the operator.
+            .call => |c| blk: {
+                const callee = try self.evaluate(c.callee);
+
+                var arguments: std.ArrayList(Value) = .empty;
+                for (c.arguments) |argument| {
+                    try arguments.append(self.allocator, try self.evaluate(argument));
+                }
+
+                const function = switch (callee) {
+                    .callable => |f| f,
+                    else => return self.runtimeError(c.paren, "Can only call functions and classes."),
+                };
+
+                if (arguments.items.len != function.arity()) {
+                    return self.runtimeErrorf(c.paren, "Expected {d} arguments but got {d}.", .{
+                        function.arity(),
+                        arguments.items.len,
+                    });
+                }
+
+                break :blk try function.call(self, arguments.items);
+            },
+
             .unary => |u| blk: {
                 const right = try self.evaluate(u.right);
                 break :blk switch (u.op.tag) {
@@ -311,18 +351,48 @@ pub const Interpreter = struct {
                     else => unreachable,
                 };
             },
-            // Book §8.4 visitAssignExpr: evaluate the value, then store it
-            // in the named variable; the expression's value is the assigned
-            // one. Assignment never creates a binding — a miss at the root
-            // environment is the book's "Undefined variable" RuntimeError.
+
+            // Book §9.3 visitLogicalExpr: evaluate the left operand, and
+            // return it unchanged when its truthiness already decides the
+            // result — that is the short circuit; the right operand's
+            // side effects never run. Otherwise the right operand is the
+            // result. Lox returns an operand value, not a coerced boolean.
+            .logical => |l| blk: {
+                const left = try self.evaluate(l.left);
+                switch (l.op.tag) {
+                    ._or => if (isTruthy(left)) break :blk left,
+                    ._and => if (!isTruthy(left)) break :blk left,
+                    else => unreachable,
+                }
+                break :blk try self.evaluate(l.right);
+            },
+
+            // Book §11.4.2 visitAssignExpr: assign to resolved local or global.
             .assign => |a| blk: {
                 const value = try self.evaluate(a.value);
-                self.environment.assign(a.name, value) catch |err| switch (err) {
-                    error.UndefinedVariable => return self.runtimeErrorf(a.name, "Undefined variable '{s}'.", .{a.name.lexeme}),
-                };
+                if (self.locals.get(e)) |distance| {
+                    try self.environment.assignAt(distance, a.name, value);
+                } else {
+                    self.globals.assign(a.name, value) catch |err| switch (err) {
+                        error.UndefinedVariable => return self.runtimeErrorf(a.name, "Undefined variable '{s}'.", .{a.name.lexeme}),
+                    };
+                }
                 break :blk value;
             },
         };
+    }
+
+    /// Book §11.4.2 lookUpVariable: fetch a variable at the resolved distance or from globals.
+    fn lookUpVariable(self: *Interpreter, name: token.Token, e: *const expr.Expr) EvalError!Value {
+        if (self.locals.get(e)) |distance| {
+            if (self.environment.getAt(distance, name.lexeme)) |val| {
+                return val;
+            }
+            return self.runtimeErrorf(name, "Undefined variable '{s}'.", .{name.lexeme});
+        } else {
+            return self.globals.get(name.lexeme) orelse
+                return self.runtimeErrorf(name, "Undefined variable '{s}'.", .{name.lexeme});
+        }
     }
 
     /// Book §7.3.1's `throw new RuntimeError(token, message)`. The payload
@@ -390,15 +460,29 @@ fn checkEqual(a: Value, b: Value) bool {
             .string => |y| std.mem.eql(u8, x, y),
             else => false,
         },
+        // Java compares objects with `equals`, and LoxFunction/native
+        // callables don't override it, so identity is pointer equality.
+        .callable => |x| switch (b) {
+            .callable => |y| x == y,
+            else => false,
+        },
     };
 }
 
 /// Lox follows Ruby's rule (book §7.2.4): `false` and `nil` are falsey,
-/// everything else is truthy.
+/// everything else — including functions — is truthy.
 fn isTruthy(v: Value) bool {
     return switch (v) {
         .boolean => |b| b,
         .nil => false,
-        .number, .string => true,
+        .number, .string, .callable => true,
     };
+}
+
+/// Book §10.2's native `clock()`: seconds since the Unix epoch as a
+/// double. Reads the real-time clock through the session's IO backend,
+/// the counterpart of Java's `System.currentTimeMillis() / 1000.0`.
+fn clockNative(it: *Interpreter, _: []const Value) Interpreter.EvalError!Value {
+    const millis = std.Io.Clock.real.now(it.io).toMilliseconds();
+    return .{ .number = @as(f64, @floatFromInt(millis)) / 1000.0 };
 }

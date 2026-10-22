@@ -2,15 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const zlox = @import("zlox");
 
-/// One Lox run (the book's Lox.run): scan, parse, execute the statement
-/// program. Only `print` statements produce output — since ch.8 the
-/// REPL takes full statements and no longer echoes expression values
-/// (book §8.1.3). `arena` must outlive everything built here; the
-/// interpreter is owned by the caller and outlives a single REPL line
-/// (the book's static `Interpreter`), so its global environment can hold
-/// bindings across lines. The result says which error flag the book's
-/// Lox would have set — syntax errors are `hadError` (exit 65),
-/// interpreter failures are `hadRuntimeError` (exit 70).
+/// One Lox run: scan, parse, resolve, and interpret statements.
 const RunResult = enum { ok, syntax_error, runtime_error };
 
 fn run(
@@ -35,11 +27,22 @@ fn run(
     }
     try stderr.flush();
 
-    // Stop if there was a syntax error (book: `if (hadError) return;`).
+    // Stop if there was a syntax error.
     if (scanner.diagnostics.items.len > 0 or
         parser.diagnostics.items.len > 0) return .syntax_error;
 
-    if (interpreter.interpret(statements.items, stdout)) {
+    // Book §11.4.3: resolve variables statically before interpreting.
+    var resolver = zlox.resolver.Resolver.init(arena, interpreter);
+    try resolver.resolve(statements.items);
+
+    for (resolver.diagnostics.items) |diag| {
+        try diag.print(stderr);
+    }
+    try stderr.flush();
+
+    // Book §11.5: stop if there were resolution errors (hadError -> exit 65).
+    if (resolver.diagnostics.items.len > 0) return .syntax_error;
+    if (interpreter.interpret(statements.items)) {
         try stdout.flush();
         return .ok;
     } else |err| switch (err) {
@@ -98,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
             Io.Limit.limited(16 * 1024 * 1024),
         );
 
-        var interpreter = try zlox.interpreter.Interpreter.init(arena);
+        var interpreter = try zlox.interpreter.Interpreter.init(arena, io, stdout);
         const result = try run(arena, source, &interpreter, stdout, stderr);
         // Indicate errors in the exit code (book §4.1: 65; §7.4: 70).
         switch (result) {
@@ -117,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     var session_arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer session_arena_state.deinit();
     const session = session_arena_state.allocator();
-    var interpreter = try zlox.interpreter.Interpreter.init(session);
+    var interpreter = try zlox.interpreter.Interpreter.init(session, io, stdout);
 
     var stdin_buffer: [4096]u8 = undefined;
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);

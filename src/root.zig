@@ -6,6 +6,8 @@ pub const parser = @import("parser.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const stmt = @import("stmt.zig");
 pub const environment = @import("environment.zig");
+pub const callable = @import("callable.zig");
+pub const resolver = @import("resolver.zig");
 
 test {
     _ = token;
@@ -16,4 +18,6 @@ test {
     _ = interpreter;
     _ = stmt;
     _ = environment;
+    _ = callable;
+    _ = resolver;
 }

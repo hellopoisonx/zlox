@@ -157,6 +157,7 @@ pub const Scanner = struct {
             '(' => .l_paren,
             ')' => .r_paren,
             ';' => .semicolon,
+            ',' => .comma,
             '{' => .l_brace,
             '}' => .r_brace,
             '>' => if (self.match('=')) .greater_equal else .greater,

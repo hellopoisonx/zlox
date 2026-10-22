@@ -10,6 +10,14 @@ const token = @import("token.zig");
 /// it with a single `arena.deinit()`.
 pub const Expr = union(enum) {
     binary: Binary,
+    /// Book §10.1 `Expr.Call`: invoking any expression that evaluates to a
+    /// callable. The closing parenthesis is kept for runtime error
+    /// locations.
+    call: Call,
+    /// Book §9.3 `Expr.Logical`: `and`/`or` get their own node instead of
+    /// reusing `binary` because the interpreter must short-circuit — the
+    /// right operand is not always evaluated.
+    logical: Logical,
     grouping: Grouping,
     literal: Literal,
     unary: Unary,
@@ -42,6 +50,42 @@ pub const Binary = struct {
     op: token.Token,
 
     pub fn init(left: *Expr, right: *Expr, op: token.Token) Binary {
+        return .{
+            .left = left,
+            .right = right,
+            .op = op,
+        };
+    }
+};
+
+/// Book §10.1 `Expr.Call`. The callee is arbitrary syntax — `fn(1)(2)` calls
+/// the result of the first call — so `call()` in the parser loops, and
+/// only the parenthesized tail marks a call. Arguments are evaluated
+/// left-to-right by the interpreter.
+pub const Call = struct {
+    callee: *Expr,
+    /// The closing `)` token: the book reports call runtime errors
+    /// (not-callable, wrong arity) at this location.
+    paren: token.Token,
+    arguments: []const *Expr,
+
+    pub fn init(callee: *Expr, paren: token.Token, arguments: []const *Expr) Call {
+        return .{
+            .callee = callee,
+            .paren = paren,
+            .arguments = arguments,
+        };
+    }
+};
+
+/// Book §9.3 `Expr.Logical`. Field order follows `Binary` in this port;
+/// `op` distinguishes `and` from `or` during evaluation.
+pub const Logical = struct {
+    left: *Expr,
+    right: *Expr,
+    op: token.Token,
+
+    pub fn init(left: *Expr, right: *Expr, op: token.Token) Logical {
         return .{
             .left = left,
             .right = right,
