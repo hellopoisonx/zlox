@@ -28,9 +28,19 @@ pub fn build(b: *std.Build) void {
     // ==========================================
     // 2. Bytecode VM Interpreter (czlox)
     // ==========================================
+
+    const trace_execution = b.option(bool, "trace-execution", "Enable opcode trace logging in VM") orelse false;
+    const options = b.addOptions();
+    options.addOption(bool, "trace_execution", trace_execution);
+
+    const options_mod = options.createModule();
+
     const vm_mod = b.addModule("czlox", .{
         .root_source_file = b.path("src/vm/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "build_options", .module = options_mod },
+        },
     });
 
     const exe_vm = b.addExecutable(.{
@@ -41,6 +51,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "czlox", .module = vm_mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });
@@ -52,18 +63,14 @@ pub fn build(b: *std.Build) void {
     // `zig build run` -> 运行 Tree-walk (zlox)
     const run_treewalk_cmd = b.addRunArtifact(exe_treewalk);
     run_treewalk_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_treewalk_cmd.addArgs(args);
-    }
+    run_treewalk_cmd.addPassthruArgs();
     const run_treewalk_step = b.step("run", "Run the tree-walk interpreter (zlox)");
     run_treewalk_step.dependOn(&run_treewalk_cmd.step);
 
     // `zig build run-vm` -> 运行 Bytecode VM (czlox)
     const run_vm_cmd = b.addRunArtifact(exe_vm);
     run_vm_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_vm_cmd.addArgs(args);
-    }
+    run_vm_cmd.addPassthruArgs();
     const run_vm_step = b.step("run-vm", "Run the bytecode VM (czlox)");
     run_vm_step.dependOn(&run_vm_cmd.step);
 
