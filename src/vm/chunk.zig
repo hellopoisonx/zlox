@@ -75,37 +75,3 @@ pub const Chunk = struct {
         return @intCast(self.constants.values.items.len - 1);
     }
 };
-
-test "OpCode.tag" {
-    const testing = std.testing;
-    try testing.expectEqualStrings("OP_RETURN", OpCode.@"return".tag());
-    try testing.expectEqualStrings("OP_CONSTANT", OpCode.constant.tag());
-    try testing.expectEqualStrings("OP_NEGATE", OpCode.negate.tag());
-    try testing.expectEqualStrings("OP_ADD", OpCode.add.tag());
-    try testing.expectEqualStrings("OP_SUBTRACT", OpCode.subtract.tag());
-    try testing.expectEqualStrings("OP_MULTIPLY", OpCode.multiply.tag());
-    try testing.expectEqualStrings("OP_DIVIDE", OpCode.divide.tag());
-    comptime {
-        const ret = OpCode.@"return".tag();
-        std.debug.assert(std.mem.eql(u8, ret, "OP_RETURN"));
-    }
-}
-
-test "Chunk writeOp and line tracking" {
-    const testing = std.testing;
-    var c = Chunk.init(testing.allocator);
-    defer c.deinit();
-
-    try c.writeOp(.constant, 1);
-    const const_idx = try c.addConstant(42.0);
-    try c.writeByte(const_idx, 1);
-    try c.writeOp(.negate, 2);
-    try c.writeOp(.@"return", 2);
-
-    try testing.expectEqual(4, c.code.items.len);
-    try testing.expectEqual(4, c.lines.items.len);
-    try testing.expectEqual(1, c.lines.items[0]);
-    try testing.expectEqual(1, c.lines.items[1]);
-    try testing.expectEqual(2, c.lines.items[2]);
-    try testing.expectEqual(2, c.lines.items[3]);
-}

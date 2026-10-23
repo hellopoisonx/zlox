@@ -3,6 +3,7 @@ const Chunk = @import("chunk.zig").Chunk;
 const OpCode = @import("chunk.zig").OpCode;
 const value = @import("value.zig");
 const debug = @import("debug.zig");
+const compiler = @import("compiler.zig");
 const build_options = @import("build_options");
 
 pub const InterpretResult = enum {
@@ -30,10 +31,10 @@ pub const VM = struct {
 
     pub fn deinit(_: *VM) void {}
 
-    pub fn interpret(self: *VM, chunk: *Chunk, writer: *std.Io.Writer) !InterpretResult {
-        self.chunk = chunk;
-        self.ip = self.chunk.?.code.items.ptr;
-        return try self.run(writer);
+    pub fn interpret(self: *VM, source: [:0]const u8, writer: *std.Io.Writer) !InterpretResult {
+        _ = self;
+        try compiler.compile(source, writer);
+        return .ok;
     }
 
     pub fn run(self: *VM, writer: *std.Io.Writer) !InterpretResult {
