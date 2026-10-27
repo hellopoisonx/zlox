@@ -17,6 +17,11 @@ pub const OpCode = enum(u8) {
     divide,
     not,
     negate,
+    print,
+    pop,
+    define_global,
+    get_global,
+    set_global,
     @"return",
 
     const names = blk: {

@@ -23,8 +23,9 @@ pub fn compile(
     var parser = Parser.init(source, heap, stdout, stderr);
     compilingChunk = chunk;
     parser.advance();
-    try parser.expression();
-    parser.consume(.eof, "Expect end of expression.");
+    while (!parser.match(.eof)) {
+        try parser.declaration();
+    }
     try parser.endCompiler();
     return !parser.hadError;
 }
@@ -43,7 +44,7 @@ const Precedence = enum {
     primary,
 };
 
-const ParseFn = *const fn (*Parser) anyerror!void;
+const ParseFn = *const fn (*Parser, bool) anyerror!void;
 
 const ParseRule = struct {
     prefix: ?ParseFn,
@@ -76,6 +77,7 @@ fn buildRules() [rule_count]ParseRule {
     table[@backingInt(Token.Tag.true)] = .{ .prefix = Parser.literal, .infix = null, .precedence = .none };
     table[@backingInt(Token.Tag.number_literal)] = .{ .prefix = Parser.number, .infix = null, .precedence = .none };
     table[@backingInt(Token.Tag.string_literal)] = .{ .prefix = Parser.string, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.identifier_literal)] = .{ .prefix = Parser.variable, .infix = null, .precedence = .none };
 
     return table;
 }
@@ -124,6 +126,57 @@ const Parser = struct {
         self.errorAtCurrent(message);
     }
 
+    fn check(self: *Parser, tag: Token.Tag) bool {
+        return self.current.tag == tag;
+    }
+
+    fn match(self: *Parser, tag: Token.Tag) bool {
+        if (!self.check(tag)) return false;
+        self.advance();
+        return true;
+    }
+
+    fn declaration(self: *Parser) !void {
+        if (self.match(.@"var")) {
+            try self.varDeclaration();
+        } else {
+            try self.statement();
+        }
+    }
+
+    fn statement(self: *Parser) !void {
+        if (self.match(.print)) {
+            try self.printStatement();
+        } else {
+            try self.expressionStatement();
+        }
+    }
+
+    fn varDeclaration(self: *Parser) !void {
+        const global = try self.parseVariable("Expect variable name.");
+
+        if (self.match(.equal)) {
+            try self.expression();
+        } else {
+            try self.emitByte(@backingInt(OpCode.nil));
+        }
+        self.consume(.semicolon, "Expect ';' after variable declaration.");
+
+        try self.defineVariable(global);
+    }
+
+    fn printStatement(self: *Parser) !void {
+        try self.expression();
+        self.consume(.semicolon, "Expect ';' after value.");
+        try self.emitByte(@backingInt(OpCode.print));
+    }
+
+    fn expressionStatement(self: *Parser) !void {
+        try self.expression();
+        self.consume(.semicolon, "Expect ';' after expression.");
+        try self.emitByte(@backingInt(OpCode.pop));
+    }
+
     fn expression(self: *Parser) !void {
         try self.parsePrecedence(.assignment);
     }
@@ -135,21 +188,58 @@ const Parser = struct {
             self.errorAtPrevious("Expect expression.");
             return;
         };
-        try prefixRule(self);
+
+        const canAssign = @backingInt(precedence) <= @backingInt(Precedence.assignment);
+        try prefixRule(self, canAssign);
 
         while (@backingInt(precedence) <= @backingInt(getRule(self.current.tag).precedence)) {
             self.advance();
             const infixRule = getRule(self.previous.tag).infix orelse unreachable;
-            try infixRule(self);
+            try infixRule(self, canAssign);
+        }
+
+        if (canAssign and self.match(.equal)) {
+            self.errorAtPrevious("Invalid assignment target.");
         }
     }
 
-    fn grouping(self: *Parser) !void {
+    fn parseVariable(self: *Parser, message: []const u8) !u8 {
+        self.consume(.identifier_literal, message);
+        return self.identifierConstant(self.previous);
+    }
+
+    fn defineVariable(self: *Parser, global: u8) !void {
+        try self.emitBytes(@backingInt(OpCode.define_global), global);
+    }
+
+    fn variable(self: *Parser, canAssign: bool) !void {
+        try self.namedVariable(self.previous, canAssign);
+    }
+
+    fn namedVariable(self: *Parser, name: Token, canAssign: bool) !void {
+        const arg = try self.identifierConstant(name);
+
+        if (canAssign and self.match(.equal)) {
+            try self.expression();
+            try self.emitBytes(@backingInt(OpCode.set_global), arg);
+        } else {
+            try self.emitBytes(@backingInt(OpCode.get_global), arg);
+        }
+    }
+
+    fn identifierConstant(self: *Parser, name: Token) !u8 {
+        const identifier = try self.heap.copyString(name.start[0..name.length]);
+        return self.makeConstant(.{ .obj = &identifier.obj });
+    }
+
+    fn grouping(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
         try self.expression();
         self.consume(.r_paren, "Expect ')' after expression.");
     }
 
-    fn unary(self: *Parser) !void {
+    fn unary(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
         const operatorTag = self.previous.tag;
         try self.parsePrecedence(.unary);
         switch (operatorTag) {
@@ -159,18 +249,21 @@ const Parser = struct {
         }
     }
 
-    fn number(self: *Parser) !void {
+    fn number(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
         const parsed = std.fmt.parseFloat(f64, self.previous.start[0..self.previous.length]) catch unreachable;
         try self.emitConstant(.{ .number = parsed });
     }
 
-    fn string(self: *Parser) !void {
+    fn string(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
         const chars = self.previous.start[1 .. self.previous.length - 1];
         const string_literal = try self.heap.copyString(chars);
         try self.emitConstant(.{ .obj = &string_literal.obj });
     }
 
-    fn literal(self: *Parser) !void {
+    fn literal(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
         const op: OpCode = switch (self.previous.tag) {
             .false => .false,
             .nil => .nil,
@@ -180,7 +273,8 @@ const Parser = struct {
         try self.emitByte(@backingInt(op));
     }
 
-    fn binary(self: *Parser) !void {
+    fn binary(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
         const operatorTag = self.previous.tag;
         const rule = getRule(operatorTag);
         const operandPrecedence = std.enums.fromInt(Precedence, @backingInt(rule.precedence) + 1) orelse unreachable;

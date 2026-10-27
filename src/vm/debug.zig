@@ -39,7 +39,7 @@ pub fn disassembleInstruction(
         return offset + 1;
     };
     return switch (op) {
-        .constant => |o| constantInstruction(writer, o.tag(), chunk, offset),
+        .constant, .define_global, .get_global, .set_global => |o| constantInstruction(writer, o.tag(), chunk, offset),
         .nil,
         .true,
         .false,
@@ -52,6 +52,8 @@ pub fn disassembleInstruction(
         .divide,
         .not,
         .negate,
+        .print,
+        .pop,
         .@"return",
         => |o| simpleInstruction(writer, o.tag(), offset),
     };

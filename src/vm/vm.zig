@@ -18,6 +18,7 @@ pub const stack_max: usize = 256;
 pub const VM = struct {
     chunk: ?*Chunk = null,
     heap: object.Heap,
+    globals: std.StringHashMapUnmanaged(value.Value) = .empty,
     ip: [*]const u8 = undefined,
     stack: [stack_max]value.Value = undefined,
     stack_top: usize = 0,
@@ -31,6 +32,7 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        self.globals.deinit(self.heap.allocator);
         self.heap.deinit();
     }
 
@@ -68,13 +70,7 @@ pub const VM = struct {
                 return .runtime_error;
             };
             switch (instruction) {
-                .@"return" => {
-                    if (self.stack_top > 0) {
-                        try value.printValue(stdout, self.pop());
-                        try stdout.print("\n", .{});
-                    }
-                    return .ok;
-                },
+                .@"return" => return .ok,
                 .constant => {
                     const constant = self.readConstant();
                     self.push(constant);
@@ -99,6 +95,27 @@ pub const VM = struct {
                         return self.runtimeError(stderr, "Operand must be a number.");
                     }
                     self.push(.{ .number = -self.pop().number });
+                },
+                .print => {
+                    try value.printValue(stdout, self.pop());
+                    try stdout.print("\n", .{});
+                },
+                .pop => _ = self.pop(),
+                .define_global => {
+                    const name = self.readString();
+                    try self.globals.put(self.heap.allocator, name.chars, self.pop());
+                },
+                .get_global => {
+                    const name = self.readString();
+                    const global = self.globals.get(name.chars) orelse
+                        return self.runtimeErrorFormat(stderr, "Undefined variable '{s}'.", .{name.chars});
+                    self.push(global);
+                },
+                .set_global => {
+                    const name = self.readString();
+                    const global = self.globals.getPtr(name.chars) orelse
+                        return self.runtimeErrorFormat(stderr, "Undefined variable '{s}'.", .{name.chars});
+                    global.* = self.peek(0);
                 },
             }
         }
@@ -143,7 +160,11 @@ pub const VM = struct {
     }
 
     fn runtimeError(self: *VM, stderr: *std.Io.Writer, message: []const u8) error{RuntimeError} {
-        stderr.print("{s}\n", .{message}) catch {};
+        return self.runtimeErrorFormat(stderr, "{s}", .{message});
+    }
+
+    fn runtimeErrorFormat(self: *VM, stderr: *std.Io.Writer, comptime fmt: []const u8, args: anytype) error{RuntimeError} {
+        stderr.print(fmt ++ "\n", args) catch {};
         const instruction = (self.ip - self.chunk.?.code.items.ptr) - 1;
         const line = self.chunk.?.lines.items[instruction];
         stderr.print("[line {d}] in script\n", .{line}) catch {};
@@ -169,6 +190,10 @@ pub const VM = struct {
 
     inline fn readConstant(self: *VM) value.Value {
         return self.chunk.?.constants.values.items[self.readByte()];
+    }
+
+    inline fn readString(self: *VM) *object.ObjString {
+        return object.asString(self.readConstant().obj);
     }
 
     pub inline fn resetStack(self: *VM) void {
