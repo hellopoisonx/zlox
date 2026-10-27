@@ -43,7 +43,7 @@ pub fn valuesEqual(a: Value, b: Value) bool {
         .boolean => |boolean| boolean == b.boolean,
         .nil => true,
         .number => |number| number == b.number,
-        .obj => |a_obj| std.mem.eql(u8, object.asString(a_obj).chars, object.asString(b.obj).chars),
+        .obj => |a_obj| a_obj == b.obj,
     };
 }
 

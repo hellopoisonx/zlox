@@ -17,12 +17,14 @@ pub const ObjString = struct {
 pub const Heap = struct {
     allocator: std.mem.Allocator,
     objects: ?*Obj = null,
+    strings: std.StringHashMapUnmanaged(*ObjString) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Heap {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *Heap) void {
+        self.strings.deinit(self.allocator);
         var object = self.objects;
         while (object) |current| {
             const next = current.next;
@@ -33,13 +35,23 @@ pub const Heap = struct {
     }
 
     pub fn copyString(self: *Heap, chars: []const u8) !*ObjString {
+        if (self.strings.get(chars)) |string| return string;
         return self.takeString(try self.allocator.dupe(u8, chars));
     }
 
     pub fn takeString(self: *Heap, chars: []u8) !*ObjString {
+        if (self.strings.get(chars)) |string| {
+            self.allocator.free(chars);
+            return string;
+        }
         errdefer self.allocator.free(chars);
-        const string = try self.allocateObject(ObjString, .string);
+
+        const string = try self.createObject(ObjString, .string);
+        errdefer self.allocator.destroy(string);
         string.chars = chars;
+
+        try self.strings.put(self.allocator, string.chars, string);
+        self.registerObject(&string.obj);
         return string;
     }
 
@@ -50,12 +62,15 @@ pub const Heap = struct {
         return self.takeString(chars);
     }
 
-    fn allocateObject(self: *Heap, comptime T: type, obj_type: ObjType) !*T {
+    fn createObject(self: *Heap, comptime T: type, obj_type: ObjType) !*T {
         const object = try self.allocator.create(T);
         object.obj = .{ .type = obj_type };
-        object.obj.next = self.objects;
-        self.objects = &object.obj;
         return object;
+    }
+
+    fn registerObject(self: *Heap, object: *Obj) void {
+        object.next = self.objects;
+        self.objects = object;
     }
 
     fn freeObject(self: *Heap, object: *Obj) void {
