@@ -4,13 +4,20 @@ const value = @import("value.zig");
 /// One-byte operation codes. The disassembler prints them in the book's
 /// uppercase OP_* form.
 pub const OpCode = enum(u8) {
-    @"return",
     constant,
-    negate,
+    nil,
+    true,
+    false,
+    equal,
+    greater,
+    less,
     add,
     subtract,
     multiply,
     divide,
+    not,
+    negate,
+    @"return",
 
     const names = blk: {
         const enum_info = @typeInfo(OpCode).@"enum";
@@ -70,8 +77,8 @@ pub const Chunk = struct {
     }
 
     /// Append a constant and return its index into the pool.
-    pub fn addConstant(self: *Chunk, constant: value.Value) std.mem.Allocator.Error!u8 {
+    pub fn addConstant(self: *Chunk, constant: value.Value) std.mem.Allocator.Error!usize {
         try self.constants.append(constant);
-        return @intCast(self.constants.values.items.len - 1);
+        return self.constants.values.items.len - 1;
     }
 };

@@ -40,12 +40,19 @@ pub fn disassembleInstruction(
     };
     return switch (op) {
         .constant => |o| constantInstruction(writer, o.tag(), chunk, offset),
-        .@"return",
-        .negate,
+        .nil,
+        .true,
+        .false,
+        .equal,
+        .greater,
+        .less,
         .add,
         .subtract,
         .multiply,
         .divide,
+        .not,
+        .negate,
+        .@"return",
         => |o| simpleInstruction(writer, o.tag(), offset),
     };
 }

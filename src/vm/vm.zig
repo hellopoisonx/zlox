@@ -2,6 +2,7 @@ const std = @import("std");
 const Chunk = @import("chunk.zig").Chunk;
 const OpCode = @import("chunk.zig").OpCode;
 const value = @import("value.zig");
+const object = @import("object.zig");
 const debug = @import("debug.zig");
 const compiler = @import("compiler.zig");
 const build_options = @import("build_options");
@@ -16,33 +17,51 @@ pub const debug_trace_execution: bool = build_options.trace_execution;
 pub const stack_max: usize = 256;
 pub const VM = struct {
     chunk: ?*Chunk = null,
-    allocator: std.mem.Allocator,
+    heap: object.Heap,
     ip: [*]const u8 = undefined,
     stack: [stack_max]value.Value = undefined,
     stack_top: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) VM {
         var vm: VM = .{
-            .allocator = allocator,
+            .heap = object.Heap.init(allocator),
         };
         vm.resetStack();
         return vm;
     }
 
-    pub fn deinit(_: *VM) void {}
-
-    pub fn interpret(self: *VM, source: [:0]const u8, writer: *std.Io.Writer) !InterpretResult {
-        _ = self;
-        try compiler.compile(source, writer);
-        return .ok;
+    pub fn deinit(self: *VM) void {
+        self.heap.deinit();
     }
 
-    pub fn run(self: *VM, writer: *std.Io.Writer) !InterpretResult {
+    pub fn interpret(
+        self: *VM,
+        source: [:0]const u8,
+        stdout: *std.Io.Writer,
+        stderr: *std.Io.Writer,
+    ) !InterpretResult {
+        var chunk = Chunk.init(self.heap.allocator);
+        defer chunk.deinit();
+        if (!(try compiler.compile(source, &chunk, &self.heap, stdout, stderr))) return .compile_error;
+
+        self.chunk = &chunk;
+        self.ip = chunk.code.items.ptr;
+        return try self.run(stdout, stderr);
+    }
+
+    pub fn run(self: *VM, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !InterpretResult {
+        return self.execute(stdout, stderr) catch |err| switch (err) {
+            error.RuntimeError => .runtime_error,
+            else => |e| return e,
+        };
+    }
+
+    fn execute(self: *VM, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !InterpretResult {
         while (true) {
             if (comptime debug_trace_execution) {
-                try self.stackDump(writer);
+                try self.stackDump(stdout);
                 const offset = self.ip - self.chunk.?.code.items.ptr;
-                _ = try debug.disassembleInstruction(writer, self.chunk.?, offset);
+                _ = try debug.disassembleInstruction(stdout, self.chunk.?, offset);
             }
 
             const instruction = std.enums.fromInt(OpCode, self.readByte()) orelse {
@@ -51,8 +70,8 @@ pub const VM = struct {
             switch (instruction) {
                 .@"return" => {
                     if (self.stack_top > 0) {
-                        try value.printValue(writer, self.pop());
-                        try writer.print("\n", .{});
+                        try value.printValue(stdout, self.pop());
+                        try stdout.print("\n", .{});
                     }
                     return .ok;
                 },
@@ -60,23 +79,77 @@ pub const VM = struct {
                     const constant = self.readConstant();
                     self.push(constant);
                 },
-                .negate => self.push(-self.pop()),
-                inline .add, .subtract, .divide, .multiply => |op| self.binaryOp(op),
+                .nil => self.push(.nil),
+                .true => self.push(.{ .boolean = true }),
+                .false => self.push(.{ .boolean = false }),
+                .equal => {
+                    const b = self.pop();
+                    const a = self.pop();
+                    self.push(.{ .boolean = value.valuesEqual(a, b) });
+                },
+                .greater => try self.binaryOp(.greater, stderr),
+                .less => try self.binaryOp(.less, stderr),
+                .add => try self.binaryOp(.add, stderr),
+                .subtract => try self.binaryOp(.subtract, stderr),
+                .multiply => try self.binaryOp(.multiply, stderr),
+                .divide => try self.binaryOp(.divide, stderr),
+                .not => self.push(.{ .boolean = value.isFalsey(self.pop()) }),
+                .negate => {
+                    if (!value.isNumber(self.peek(0))) {
+                        return self.runtimeError(stderr, "Operand must be a number.");
+                    }
+                    self.push(.{ .number = -self.pop().number });
+                },
             }
         }
     }
 
-    inline fn binaryOp(self: *VM, comptime op: OpCode) void {
-        const b = self.pop();
-        const a = self.pop();
-        const result = switch (op) {
-            .add => a + b,
-            .subtract => a - b,
-            .multiply => a * b,
-            .divide => a / b,
+    inline fn binaryOp(self: *VM, comptime op: OpCode, stderr: *std.Io.Writer) !void {
+        if (op == .add) {
+            if (value.isString(self.peek(1)) and value.isString(self.peek(0))) {
+                try self.concatenate();
+                return;
+            }
+            if (!value.isNumber(self.peek(1)) or !value.isNumber(self.peek(0))) {
+                return self.runtimeError(stderr, "Operands must be two numbers or two strings.");
+            }
+            const b = self.pop().number;
+            const a = self.pop().number;
+            self.push(.{ .number = a + b });
+            return;
+        }
+
+        if (!value.isNumber(self.peek(1)) or !value.isNumber(self.peek(0))) {
+            return self.runtimeError(stderr, "Operands must be numbers.");
+        }
+
+        const b = self.pop().number;
+        const a = self.pop().number;
+        self.push(switch (op) {
+            .subtract => .{ .number = a - b },
+            .multiply => .{ .number = a * b },
+            .divide => .{ .number = a / b },
+            .greater => .{ .boolean = a > b },
+            .less => .{ .boolean = a < b },
             else => @compileError("Unsupported binary operation for " ++ @tagName(op)),
-        };
-        self.push(result);
+        });
+    }
+
+    fn concatenate(self: *VM) !void {
+        const b = object.asString(self.pop().obj);
+        const a = object.asString(self.pop().obj);
+        const result = try self.heap.concatenate(a, b);
+        self.push(.{ .obj = &result.obj });
+    }
+
+    fn runtimeError(self: *VM, stderr: *std.Io.Writer, message: []const u8) error{RuntimeError} {
+        stderr.print("{s}\n", .{message}) catch {};
+        const instruction = (self.ip - self.chunk.?.code.items.ptr) - 1;
+        const line = self.chunk.?.lines.items[instruction];
+        stderr.print("[line {d}] in script\n", .{line}) catch {};
+        stderr.flush() catch {};
+        self.resetStack();
+        return error.RuntimeError;
     }
 
     inline fn stackDump(self: *const VM, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -110,5 +183,9 @@ pub const VM = struct {
     pub inline fn pop(self: *VM) value.Value {
         self.stack_top -= 1;
         return self.stack[self.stack_top];
+    }
+
+    pub inline fn peek(self: *const VM, distance: usize) value.Value {
+        return self.stack[self.stack_top - 1 - distance];
     }
 };

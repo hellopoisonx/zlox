@@ -3,7 +3,7 @@ const Io = std.Io;
 const czlox = @import("czlox");
 
 /// The book's repl(): read one line at a time and interpret it (§16.1).
-fn repl(vm: *czlox.vm.VM, io: Io, stdout: *Io.Writer) !void {
+fn repl(vm: *czlox.vm.VM, io: Io, stdout: *Io.Writer, stderr: *Io.Writer) !void {
     var stdin_buffer: [1024]u8 = undefined;
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
@@ -48,7 +48,7 @@ fn repl(vm: *czlox.vm.VM, io: Io, stdout: *Io.Writer) !void {
         line_buffer[line.len] = 0;
         const source = line_buffer[0..line.len :0];
 
-        _ = try vm.interpret(source, stdout);
+        _ = try vm.interpret(source, stdout, stderr);
         try stdout.flush();
     }
 }
@@ -82,7 +82,7 @@ fn runFile(
     raw_z[raw.len] = 0;
     const source = raw_z[0..raw.len :0];
 
-    const result = try vm.interpret(source, stdout);
+    const result = try vm.interpret(source, stdout, stderr);
     try stdout.flush();
 
     switch (result) {
@@ -109,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     defer vm.deinit();
 
     if (args.len == 1) {
-        try repl(&vm, io, stdout);
+        try repl(&vm, io, stdout, stderr);
     } else if (args.len == 2) {
         try runFile(&vm, io, args[1], stdout, stderr);
     } else {

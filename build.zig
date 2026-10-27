@@ -30,8 +30,10 @@ pub fn build(b: *std.Build) void {
     // ==========================================
 
     const trace_execution = b.option(bool, "trace-execution", "Enable opcode trace logging in VM") orelse false;
+    const print_code = b.option(bool, "print-code", "Enable chunk disassembly after compiling") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "trace_execution", trace_execution);
+    options.addOption(bool, "print_code", print_code);
 
     const options_mod = options.createModule();
 

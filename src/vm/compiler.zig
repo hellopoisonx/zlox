@@ -1,24 +1,267 @@
 const std = @import("std");
 
-const scan = @import("scan.zig");
+const Chunk = @import("chunk.zig").Chunk;
+const OpCode = @import("chunk.zig").OpCode;
+const Scanner = @import("scan.zig").Scanner;
+const Token = @import("scan.zig").Token;
+const value = @import("value.zig");
+const object = @import("object.zig");
+const debug = @import("debug.zig");
+const build_options = @import("build_options");
 
-/// Temporary front end (book §16.2): drive the scanner on demand and
-/// print each token until end of file; the real compiler arrives in
-/// chapter 17. Flushing the writer is left to the caller.
-pub fn compile(source: [:0]const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    var scanner = scan.Scanner.init(source);
+const print_code: bool = build_options.print_code;
 
-    var line: usize = 0;
-    while (true) {
-        const token = scanner.scanToken();
-        if (token.line != line) {
-            try writer.print("{d:>4} ", .{token.line});
-            line = token.line;
-        } else {
-            try writer.print("   | ", .{});
-        }
-        try writer.print("{s} '{s}'\n", .{ @tagName(token.tag), token.start[0..token.length] });
+var compilingChunk: *Chunk = undefined;
 
-        if (token.tag == .eof) break;
-    }
+pub fn compile(
+    source: [:0]const u8,
+    chunk: *Chunk,
+    heap: *object.Heap,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !bool {
+    var parser = Parser.init(source, heap, stdout, stderr);
+    compilingChunk = chunk;
+    parser.advance();
+    try parser.expression();
+    parser.consume(.eof, "Expect end of expression.");
+    try parser.endCompiler();
+    return !parser.hadError;
 }
+
+const Precedence = enum {
+    none,
+    assignment,
+    @"or",
+    @"and",
+    equality,
+    comparison,
+    term,
+    factor,
+    unary,
+    call,
+    primary,
+};
+
+const ParseFn = *const fn (*Parser) anyerror!void;
+
+const ParseRule = struct {
+    prefix: ?ParseFn,
+    infix: ?ParseFn,
+    precedence: Precedence,
+};
+
+const rule_count = std.enums.values(Token.Tag).len;
+
+const rules: [rule_count]ParseRule = buildRules();
+
+fn buildRules() [rule_count]ParseRule {
+    var table: [rule_count]ParseRule = undefined;
+    for (&table) |*rule| rule.* = .{ .prefix = null, .infix = null, .precedence = .none };
+
+    table[@backingInt(Token.Tag.l_paren)] = .{ .prefix = Parser.grouping, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.minus)] = .{ .prefix = Parser.unary, .infix = Parser.binary, .precedence = .term };
+    table[@backingInt(Token.Tag.plus)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .term };
+    table[@backingInt(Token.Tag.slash)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .factor };
+    table[@backingInt(Token.Tag.star)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .factor };
+    table[@backingInt(Token.Tag.bang)] = .{ .prefix = Parser.unary, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.bang_equal)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .equality };
+    table[@backingInt(Token.Tag.equal_equal)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .equality };
+    table[@backingInt(Token.Tag.greater)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .comparison };
+    table[@backingInt(Token.Tag.greater_equal)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .comparison };
+    table[@backingInt(Token.Tag.less)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .comparison };
+    table[@backingInt(Token.Tag.less_equal)] = .{ .prefix = null, .infix = Parser.binary, .precedence = .comparison };
+    table[@backingInt(Token.Tag.false)] = .{ .prefix = Parser.literal, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.nil)] = .{ .prefix = Parser.literal, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.true)] = .{ .prefix = Parser.literal, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.number_literal)] = .{ .prefix = Parser.number, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.string_literal)] = .{ .prefix = Parser.string, .infix = null, .precedence = .none };
+
+    return table;
+}
+
+fn getRule(tag: Token.Tag) *const ParseRule {
+    return &rules[@backingInt(tag)];
+}
+
+const Parser = struct {
+    scanner: Scanner,
+    heap: *object.Heap,
+    current: Token,
+    previous: Token,
+    hadError: bool,
+    panicMode: bool,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+
+    fn init(source: [:0]const u8, heap: *object.Heap, stdout: *std.Io.Writer, stderr: *std.Io.Writer) Parser {
+        return .{
+            .scanner = Scanner.init(source),
+            .heap = heap,
+            .current = undefined,
+            .previous = undefined,
+            .hadError = false,
+            .panicMode = false,
+            .stdout = stdout,
+            .stderr = stderr,
+        };
+    }
+
+    fn advance(self: *Parser) void {
+        self.previous = self.current;
+        while (true) {
+            self.current = self.scanner.scanToken();
+            if (self.current.tag != .@"error") break;
+            self.errorAtCurrent(self.current.start[0..self.current.length]);
+        }
+    }
+
+    fn consume(self: *Parser, tag: Token.Tag, message: []const u8) void {
+        if (self.current.tag == tag) {
+            self.advance();
+            return;
+        }
+        self.errorAtCurrent(message);
+    }
+
+    fn expression(self: *Parser) !void {
+        try self.parsePrecedence(.assignment);
+    }
+
+    fn parsePrecedence(self: *Parser, precedence: Precedence) !void {
+        self.advance();
+
+        const prefixRule = getRule(self.previous.tag).prefix orelse {
+            self.errorAtPrevious("Expect expression.");
+            return;
+        };
+        try prefixRule(self);
+
+        while (@backingInt(precedence) <= @backingInt(getRule(self.current.tag).precedence)) {
+            self.advance();
+            const infixRule = getRule(self.previous.tag).infix orelse unreachable;
+            try infixRule(self);
+        }
+    }
+
+    fn grouping(self: *Parser) !void {
+        try self.expression();
+        self.consume(.r_paren, "Expect ')' after expression.");
+    }
+
+    fn unary(self: *Parser) !void {
+        const operatorTag = self.previous.tag;
+        try self.parsePrecedence(.unary);
+        switch (operatorTag) {
+            .bang => try self.emitByte(@backingInt(OpCode.not)),
+            .minus => try self.emitByte(@backingInt(OpCode.negate)),
+            else => {},
+        }
+    }
+
+    fn number(self: *Parser) !void {
+        const parsed = std.fmt.parseFloat(f64, self.previous.start[0..self.previous.length]) catch unreachable;
+        try self.emitConstant(.{ .number = parsed });
+    }
+
+    fn string(self: *Parser) !void {
+        const chars = self.previous.start[1 .. self.previous.length - 1];
+        const string_literal = try self.heap.copyString(chars);
+        try self.emitConstant(.{ .obj = &string_literal.obj });
+    }
+
+    fn literal(self: *Parser) !void {
+        const op: OpCode = switch (self.previous.tag) {
+            .false => .false,
+            .nil => .nil,
+            .true => .true,
+            else => unreachable,
+        };
+        try self.emitByte(@backingInt(op));
+    }
+
+    fn binary(self: *Parser) !void {
+        const operatorTag = self.previous.tag;
+        const rule = getRule(operatorTag);
+        const operandPrecedence = std.enums.fromInt(Precedence, @backingInt(rule.precedence) + 1) orelse unreachable;
+        try self.parsePrecedence(operandPrecedence);
+
+        switch (operatorTag) {
+            .bang_equal => try self.emitBytes(@backingInt(OpCode.equal), @backingInt(OpCode.not)),
+            .equal_equal => try self.emitByte(@backingInt(OpCode.equal)),
+            .greater => try self.emitByte(@backingInt(OpCode.greater)),
+            .greater_equal => try self.emitBytes(@backingInt(OpCode.less), @backingInt(OpCode.not)),
+            .less => try self.emitByte(@backingInt(OpCode.less)),
+            .less_equal => try self.emitBytes(@backingInt(OpCode.greater), @backingInt(OpCode.not)),
+            .plus => try self.emitByte(@backingInt(OpCode.add)),
+            .minus => try self.emitByte(@backingInt(OpCode.subtract)),
+            .star => try self.emitByte(@backingInt(OpCode.multiply)),
+            .slash => try self.emitByte(@backingInt(OpCode.divide)),
+            else => {},
+        }
+    }
+
+    fn emitConstant(self: *Parser, constant: value.Value) !void {
+        try self.emitBytes(@backingInt(OpCode.constant), try self.makeConstant(constant));
+    }
+
+    fn makeConstant(self: *Parser, constant: value.Value) !u8 {
+        const index = try currentChunk().addConstant(constant);
+        if (index > std.math.maxInt(u8)) {
+            self.errorAtPrevious("Too many constants in one chunk.");
+            return 0;
+        }
+        return @intCast(index);
+    }
+
+    fn endCompiler(self: *Parser) !void {
+        try self.emitReturn();
+
+        if (comptime print_code) {
+            if (!self.hadError) {
+                try debug.disassembleChunk(self.stdout, currentChunk(), "code");
+            }
+        }
+    }
+
+    fn emitReturn(self: *Parser) !void {
+        try self.emitByte(@backingInt(OpCode.@"return"));
+    }
+
+    fn emitBytes(self: *Parser, byte1: u8, byte2: u8) !void {
+        try self.emitByte(byte1);
+        try self.emitByte(byte2);
+    }
+
+    fn emitByte(self: *Parser, byte: u8) !void {
+        try currentChunk().writeByte(byte, self.previous.line);
+    }
+
+    fn currentChunk() *Chunk {
+        return compilingChunk;
+    }
+
+    fn errorAtCurrent(self: *Parser, message: []const u8) void {
+        self.errorAt(self.current, message);
+    }
+
+    fn errorAtPrevious(self: *Parser, message: []const u8) void {
+        self.errorAt(self.previous, message);
+    }
+
+    fn errorAt(self: *Parser, token: Token, message: []const u8) void {
+        if (self.panicMode) return;
+        self.panicMode = true;
+
+        self.stderr.print("[line {d}] Error", .{token.line}) catch {};
+        if (token.tag == .eof) {
+            self.stderr.print(" at end", .{}) catch {};
+        } else if (token.tag != .@"error") {
+            self.stderr.print(" at '{s}'", .{token.start[0..token.length]}) catch {};
+        }
+        self.stderr.print(": {s}\n", .{message}) catch {};
+        self.stderr.flush() catch {};
+
+        self.hadError = true;
+    }
+};
