@@ -101,6 +101,14 @@ pub const VM = struct {
                     try stdout.print("\n", .{});
                 },
                 .pop => _ = self.pop(),
+                .get_local => {
+                    const slot = self.readByte();
+                    self.push(self.stack[slot]);
+                },
+                .set_local => {
+                    const slot = self.readByte();
+                    self.stack[slot] = self.peek(0);
+                },
                 .define_global => {
                     const name = self.readString();
                     try self.globals.put(self.heap.allocator, name.chars, self.pop());

@@ -19,6 +19,8 @@ pub const OpCode = enum(u8) {
     negate,
     print,
     pop,
+    get_local,
+    set_local,
     define_global,
     get_global,
     set_global,

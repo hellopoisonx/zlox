@@ -39,6 +39,7 @@ pub fn disassembleInstruction(
         return offset + 1;
     };
     return switch (op) {
+        .get_local, .set_local => |o| byteInstruction(writer, o.tag(), chunk, offset),
         .constant, .define_global, .get_global, .set_global => |o| constantInstruction(writer, o.tag(), chunk, offset),
         .nil,
         .true,
@@ -66,6 +67,17 @@ fn simpleInstruction(
 ) std.Io.Writer.Error!usize {
     try writer.print("{s}\n", .{name});
     return offset + 1;
+}
+
+fn byteInstruction(
+    writer: *std.Io.Writer,
+    name: []const u8,
+    chunk: *const Chunk,
+    offset: usize,
+) std.Io.Writer.Error!usize {
+    const slot = chunk.code.items[offset + 1];
+    try writer.print("{s:<16} {d:4}\n", .{ name, slot });
+    return offset + 2;
 }
 
 fn constantInstruction(
