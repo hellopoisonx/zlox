@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    var vm = czlox.vm.VM.init(init.gpa);
+    var vm = try czlox.vm.VM.init(init.gpa);
     defer vm.deinit();
 
     if (args.len == 1) {

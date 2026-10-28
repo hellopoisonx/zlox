@@ -31,9 +31,13 @@ pub fn build(b: *std.Build) void {
 
     const trace_execution = b.option(bool, "trace-execution", "Enable opcode trace logging in VM") orelse false;
     const print_code = b.option(bool, "print-code", "Enable chunk disassembly after compiling") orelse false;
+    const stress_gc = b.option(bool, "stress-gc", "Stress test garbage collector") orelse false;
+    const log_gc = b.option(bool, "log-gc", "Enable garbage collection logging") orelse false;
     const options = b.addOptions();
     options.addOption(bool, "trace_execution", trace_execution);
     options.addOption(bool, "print_code", print_code);
+    options.addOption(bool, "stress_gc", stress_gc);
+    options.addOption(bool, "log_gc", log_gc);
 
     const options_mod = options.createModule();
 
