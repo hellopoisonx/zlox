@@ -40,6 +40,8 @@ pub fn disassembleInstruction(
     };
     return switch (op) {
         .get_local, .set_local => |o| byteInstruction(writer, o.tag(), chunk, offset),
+        .jump, .jump_if_false => |o| jumpInstruction(writer, o.tag(), 1, chunk, offset),
+        .loop => |o| jumpInstruction(writer, o.tag(), -1, chunk, offset),
         .constant, .define_global, .get_global, .set_global => |o| constantInstruction(writer, o.tag(), chunk, offset),
         .nil,
         .true,
@@ -78,6 +80,19 @@ fn byteInstruction(
     const slot = chunk.code.items[offset + 1];
     try writer.print("{s:<16} {d:4}\n", .{ name, slot });
     return offset + 2;
+}
+
+fn jumpInstruction(
+    writer: *std.Io.Writer,
+    name: []const u8,
+    sign: i32,
+    chunk: *const Chunk,
+    offset: usize,
+) std.Io.Writer.Error!usize {
+    const jump: u16 = (@as(u16, chunk.code.items[offset + 1]) << 8) | chunk.code.items[offset + 2];
+    const target = @as(i32, @intCast(offset)) + 3 + sign * @as(i32, jump);
+    try writer.print("{s:<16} {d:4} -> {d}\n", .{ name, offset, target });
+    return offset + 3;
 }
 
 fn constantInstruction(

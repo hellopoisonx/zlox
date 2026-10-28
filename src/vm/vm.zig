@@ -100,6 +100,18 @@ pub const VM = struct {
                     try value.printValue(stdout, self.pop());
                     try stdout.print("\n", .{});
                 },
+                .jump => {
+                    const offset = self.readShort();
+                    self.ip += offset;
+                },
+                .jump_if_false => {
+                    const offset = self.readShort();
+                    if (value.isFalsey(self.peek(0))) self.ip += offset;
+                },
+                .loop => {
+                    const offset = self.readShort();
+                    self.ip -= offset;
+                },
                 .pop => _ = self.pop(),
                 .get_local => {
                     const slot = self.readByte();
@@ -194,6 +206,12 @@ pub const VM = struct {
     inline fn readByte(self: *VM) u8 {
         defer self.ip += 1;
         return self.ip[0];
+    }
+
+    inline fn readShort(self: *VM) u16 {
+        const high: u16 = self.readByte();
+        const low: u16 = self.readByte();
+        return (high << 8) | low;
     }
 
     inline fn readConstant(self: *VM) value.Value {

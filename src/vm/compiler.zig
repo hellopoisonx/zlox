@@ -114,6 +114,8 @@ fn buildRules() [rule_count]ParseRule {
     table[@backingInt(Token.Tag.number_literal)] = .{ .prefix = Parser.number, .infix = null, .precedence = .none };
     table[@backingInt(Token.Tag.string_literal)] = .{ .prefix = Parser.string, .infix = null, .precedence = .none };
     table[@backingInt(Token.Tag.identifier_literal)] = .{ .prefix = Parser.variable, .infix = null, .precedence = .none };
+    table[@backingInt(Token.Tag.@"and")] = .{ .prefix = null, .infix = Parser.and_, .precedence = .@"and" };
+    table[@backingInt(Token.Tag.@"or")] = .{ .prefix = null, .infix = Parser.or_, .precedence = .@"or" };
 
     return table;
 }
@@ -180,9 +182,15 @@ const Parser = struct {
         }
     }
 
-    fn statement(self: *Parser) !void {
+    fn statement(self: *Parser) std.mem.Allocator.Error!void {
         if (self.match(.print)) {
             try self.printStatement();
+        } else if (self.match(.@"if")) {
+            try self.ifStatement();
+        } else if (self.match(.@"while")) {
+            try self.whileStatement();
+        } else if (self.match(.@"for")) {
+            try self.forStatement();
         } else if (self.match(.l_brace)) {
             beginScope();
             try self.block();
@@ -234,6 +242,85 @@ const Parser = struct {
         try self.expression();
         self.consume(.semicolon, "Expect ';' after expression.");
         try self.emitByte(@backingInt(OpCode.pop));
+    }
+
+    fn ifStatement(self: *Parser) !void {
+        self.consume(.l_paren, "Expect '(' after 'if'.");
+        try self.expression();
+        self.consume(.r_paren, "Expect ')' after condition.");
+
+        const thenJump = try self.emitJump(.jump_if_false);
+        try self.emitByte(@backingInt(OpCode.pop));
+        try self.statement();
+
+        const elseJump = try self.emitJump(.jump);
+
+        self.patchJump(thenJump);
+        try self.emitByte(@backingInt(OpCode.pop));
+
+        if (self.match(.@"else")) try self.statement();
+        self.patchJump(elseJump);
+    }
+
+    fn whileStatement(self: *Parser) !void {
+        const loopStart = currentChunk().code.items.len;
+        self.consume(.l_paren, "Expect '(' after 'while'.");
+        try self.expression();
+        self.consume(.r_paren, "Expect ')' after condition.");
+
+        const exitJump = try self.emitJump(.jump_if_false);
+        try self.emitByte(@backingInt(OpCode.pop));
+        try self.statement();
+        try self.emitLoop(loopStart);
+
+        self.patchJump(exitJump);
+        try self.emitByte(@backingInt(OpCode.pop));
+    }
+
+    fn forStatement(self: *Parser) !void {
+        beginScope();
+        self.consume(.l_paren, "Expect '(' after 'for'.");
+
+        if (!self.match(.semicolon)) {
+            if (self.match(.@"var")) {
+                try self.varDeclaration();
+            } else {
+                try self.expressionStatement();
+            }
+        }
+
+        var loopStart = currentChunk().code.items.len;
+
+        var exitJump: ?usize = null;
+        if (!self.match(.semicolon)) {
+            try self.expression();
+            self.consume(.semicolon, "Expect ';' after loop condition.");
+
+            exitJump = try self.emitJump(.jump_if_false);
+            try self.emitByte(@backingInt(OpCode.pop));
+        }
+
+        if (!self.match(.r_paren)) {
+            const bodyJump = try self.emitJump(.jump);
+            const incrementStart = currentChunk().code.items.len;
+            try self.expression();
+            try self.emitByte(@backingInt(OpCode.pop));
+            self.consume(.r_paren, "Expect ')' after for clauses.");
+
+            try self.emitLoop(loopStart);
+            loopStart = incrementStart;
+            self.patchJump(bodyJump);
+        }
+
+        try self.statement();
+        try self.emitLoop(loopStart);
+
+        if (exitJump) |jump| {
+            self.patchJump(jump);
+            try self.emitByte(@backingInt(OpCode.pop));
+        }
+
+        try self.endScope();
     }
 
     fn expression(self: *Parser) !void {
@@ -422,6 +509,28 @@ const Parser = struct {
         }
     }
 
+    fn and_(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
+        const endJump = try self.emitJump(.jump_if_false);
+
+        try self.emitByte(@backingInt(OpCode.pop));
+        try self.parsePrecedence(.@"and");
+
+        self.patchJump(endJump);
+    }
+
+    fn or_(self: *Parser, canAssign: bool) !void {
+        _ = canAssign;
+        const elseJump = try self.emitJump(.jump_if_false);
+        const endJump = try self.emitJump(.jump);
+
+        self.patchJump(elseJump);
+        try self.emitByte(@backingInt(OpCode.pop));
+
+        try self.parsePrecedence(.@"or");
+        self.patchJump(endJump);
+    }
+
     fn emitConstant(self: *Parser, constant: value.Value) !void {
         try self.emitBytes(@backingInt(OpCode.constant), try self.makeConstant(constant));
     }
@@ -452,6 +561,36 @@ const Parser = struct {
     fn emitBytes(self: *Parser, byte1: u8, byte2: u8) !void {
         try self.emitByte(byte1);
         try self.emitByte(byte2);
+    }
+
+    fn emitJump(self: *Parser, instruction: OpCode) !usize {
+        try self.emitByte(@backingInt(instruction));
+        try self.emitByte(0xff);
+        try self.emitByte(0xff);
+        return currentChunk().code.items.len - 2;
+    }
+
+    fn patchJump(self: *Parser, offset: usize) void {
+        const jump = currentChunk().code.items.len - offset - 2;
+
+        if (jump > std.math.maxInt(u16)) {
+            self.errorAtPrevious("Too much code to jump over.");
+        }
+
+        currentChunk().code.items[offset] = @intCast((jump >> 8) & 0xff);
+        currentChunk().code.items[offset + 1] = @intCast(jump & 0xff);
+    }
+
+    fn emitLoop(self: *Parser, loopStart: usize) !void {
+        try self.emitByte(@backingInt(OpCode.loop));
+
+        const offset = currentChunk().code.items.len - loopStart + 2;
+        if (offset > std.math.maxInt(u16)) {
+            self.errorAtPrevious("Loop body too large.");
+        }
+
+        try self.emitByte(@intCast((offset >> 8) & 0xff));
+        try self.emitByte(@intCast(offset & 0xff));
     }
 
     fn emitByte(self: *Parser, byte: u8) !void {
